@@ -1,0 +1,86 @@
+[
+    {
+      "key": "iso_main",
+      "topic": "ISO overview, services, contact",
+      "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/international-student-office",
+      "file": "iso_main.txt",
+      "chars": 28
+    },
+    {
+      "key": "iso_incoming",
+      "topic": "Incoming students, nomination, application process",
+      "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/international-student-office/incoming-students",
+      "file": "iso_incoming.txt",
+      "chars": 22
+    },
+    {
+      "key": "iso_fyi_integration",
+      "topic": "Integration support, first steps in Germany for international students",
+      "url": "https://www.ostfalia.de/en/studieren/im-studium/international/fyi-for-your-integration",
+      "file": "iso_fyi_integration.txt",
+      "chars": 26
+    },
+    {
+      "key": "iso_incoming_path",
+      "topic": "Step-by-step path for incoming international students",
+      "url": "https://www.ostfalia.de/studieren/im-studium/international/studierende-aus-dem-ausland/dein-weg-an-die-ostfalia",
+      "file": "iso_incoming_path.txt",
+      "chars": 24
+    },
+    {
+      "key": "erasmus_outgoing",
+      "topic": "Erasmus+ and ways to study abroad as an Ostfalia student",
+      "url": "https://www.ostfalia.de/studieren/im-studium/international/wege-ins-ausland",
+      "file": "erasmus_outgoing.txt",
+      "chars": 16
+    },
+    {
+      "key": "language_courses",
+      "topic": "Language courses at Sprachenzentrum",
+      "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/sprachenzentrum",
+      "file": "language_courses.txt",
+      "chars": 15
+    },
+    {
+      "key": "german_as_foreign_language",
+      "topic": "German as a foreign language (DaF) courses for international students",
+      "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language",
+      "file": "german_as_foreign_language.txt",
+      "chars": 28
+    },
+    {
+      "key": "sprachtandem",
+      "topic": "Language tandem program — practice German with a native speaker",
+      "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/language-tandem",
+      "file": "sprachtandem.txt",
+      "chars": 15
+    },
+    {
+      "key": "housing",
+      "topic": "Student housing and accommodation options",
+      "url": "https://www.ostfalia.de/studieren/studieninteressierte/wohnen",
+      "file": "housing.txt",
+      "chars": 6
+    },
+    {
+      "key": "studierenden_service",
+      "topic": "Student service office — general admin (redirect target for out-of-scope questions)",
+      "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/studierenden-service",
+      "file": "studierenden_service.txt",
+      "chars": 20
+    },
+    {
+      "key": "partner_universities_informatik",
+      "topic": "Partner universities worldwide for Informatik faculty — Erasmus and non-EU",
+      "url": "manual/pdf",
+      "file": "partner_universities_informatik.txt",
+      "chars": 2170
+    },
+    {
+      "key": "iso_contacts_and_redirect",
+      "topic": "ISO contact details and redirect rules for out-of-scope questions",
+      "url": "manual/pdf",
+      "file": "iso_contacts_and_redirect.txt",
+      "chars": 1125
+    }
+  ]
