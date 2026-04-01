@@ -5,7 +5,7 @@ LOCAL_IP  = "0.0.0.0" # replace once you have Temi's IP
 
 # ── LLM ──
 LLM_MODEL = "gpt-4o-mini"
-OPENAI_API_KEY  = "YOUR_KEY_HERE"   # or set env var OPENAI_API_KEY
+OPENAI_API_KEY  = ""   # or set env var OPENAI_API_KEY
 LLM_TEMPERATURE = 0.3
 
 # TODO: I am actually unsure if we do have an API KEY for OPEN AI, do you guys remember what the professor said?
