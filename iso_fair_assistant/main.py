@@ -1,0 +1,157 @@
+# main.py — Smart ISO Fair Assistant
+#
+# Run with:   python main.py
+# Stop with:  Ctrl+C  (clean shutdown)
+
+import logging
+import signal
+import sys
+import time
+
+import config
+from agents.pepper_agent import PepperAgent
+from agents.temi_agent import TemiAgent
+from knowledge_base import KnowledgeBase
+from orchestrator import Orchestrator
+from session import SessionManager
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.DEBUG if config.DEBUG else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("main")
+
+
+# ── Speech-to-text (Whisper) ───────────────────────────────────────────────────
+try:
+    import whisper as _whisper
+    import sounddevice as _sd
+    import numpy as _np
+
+    _whisper_model = _whisper.load_model("base")
+
+    def listen_whisper(duration: float = 6.0, sample_rate: int = 16_000) -> str | None:
+        log.debug("Listening (%.0fs) ...", duration)
+        audio = _sd.rec(
+            int(duration * sample_rate),
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+        )
+        _sd.wait()
+        flat = audio.flatten()
+        result = _whisper_model.transcribe(flat, fp16=False, language="en")
+        text = result["text"].strip()
+        log.info("Whisper heard: %s", text)
+        return text if text else None
+
+    log.info("Whisper STT ready.")
+
+except ImportError:
+    log.warning("whisper/sounddevice not installed — using keyboard input fallback.")
+
+    def listen_whisper(duration: float = 6.0, sample_rate: int = 16_000) -> str | None:
+        try:
+            text = input("  [TYPE visitor input]: ").strip()
+            return text if text else None
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+
+# ── Shutdown ───────────────────────────────────────────────────────────────────
+def _shutdown(pepper: PepperAgent, temi: TemiAgent):
+    log.info("Shutting down ...")
+    pepper.disconnect()
+    temi.disconnect()
+    sys.exit(0)
+
+
+# ── Main loop ──────────────────────────────────────────────────────────────────
+def main():
+    print("\n" + "="*55)
+    print("  Smart ISO Fair Assistant — Starting up")
+    print("="*55 + "\n")
+
+    # 1. Connect
+    pepper   = PepperAgent()
+    temi     = TemiAgent()
+    kb       = KnowledgeBase(config.KB_INDEX_DIR, config.EMBED_MODEL, config.KB_TOP_K)
+    sessions = SessionManager()
+
+    if not pepper.connect():
+        log.critical("Cannot connect to Pepper. Exiting.")
+        sys.exit(1)
+
+    if not temi.connect():
+        log.critical("Cannot connect to Temi. Exiting.")
+        sys.exit(1)
+
+    pepper.print_status()
+
+    orchestrator = Orchestrator(pepper, temi, kb, sessions)
+
+    signal.signal(signal.SIGINT, lambda *_: _shutdown(pepper, temi))
+
+    print("\nSystem ready. Waiting for visitors ...\n")
+
+    # Startup display
+    pepper.attract_visitors()
+    try:
+        temi.show_welcome()
+    except Exception as e:
+        log.error("Temi welcome screen failed: %s", e)
+
+    # 2. Main event loop
+    while True:
+        log.debug("Scanning for visitors ...")
+        if not pepper.detect_face():
+            time.sleep(1)
+            continue
+
+        log.info("Visitor detected!")
+
+        # QR-Code optional
+        visitor_id = pepper.scan_qr_code()
+        if visitor_id is None:
+            visitor_id = SessionManager.generate_id()
+            log.info("No QR code — assigned anonymous ID: %s", visitor_id)
+
+        # Start interaction
+        orchestrator.start_interaction(visitor_id)
+
+        last_input_time = time.time()
+        session_active  = True
+
+        while session_active:
+            if time.time() - last_input_time > config.SESSION_IDLE_TIMEOUT:
+                log.info("Session timed out — no input for %ds.", config.SESSION_IDLE_TIMEOUT)
+                session_active = False
+                break
+
+            visitor_text = listen_whisper(duration=6.0)
+            if not visitor_text:
+                continue
+
+            last_input_time = time.time()
+            continue_session = orchestrator.handle_input(visitor_text)
+
+            if not continue_session:
+                session_active = False
+
+        # End session
+        orchestrator.end_interaction()
+        stats = sessions.stats()
+        log.info("Session stats: %s", stats)
+
+        # Reset display
+        pepper.attract_visitors()
+        try:
+            temi.show_welcome()
+        except Exception as e:
+            log.error("Temi welcome screen failed: %s", e)
+
+
+if __name__ == "__main__":
+    main()
