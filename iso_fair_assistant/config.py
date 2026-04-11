@@ -1,6 +1,6 @@
 # ── Robot IPs ──
-PEPPER_IP = "172.30.36.42" # from professor's test file
-TEMI_IP   = "172.30.36.32" # your machine's IP on the same network
+PEPPER_IP = "172.30.36.41" # from professor's test file
+TEMI_IP   = "172.30.36.31" # your machine's IP on the same network
 LOCAL_IP  = "0.0.0.0" # replace once you have Temi's IP
 
 # ── LLM ──

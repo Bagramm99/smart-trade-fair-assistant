@@ -52,8 +52,6 @@ except ImportError:
 
 
 # ── Topic → image mapping ─────────────────────────────────────────────────────
-# Maps LLM-identified topics to PNG filenames in assets/temi_screens/.
-# Add entries here as new slide exports become available.
 
 TOPIC_IMAGES = {
     "default":               "iso_contact_card.png",
@@ -97,7 +95,10 @@ class TemiAgent:
 
     def disconnect(self):
         if self._robot:
-            self._robot.stop()
+            try:
+                self._robot.stop()
+            except Exception:
+                pass
             log.info("Temi disconnected.")
 
     # ── Main actions called by orchestrator ────────────────────────────────────
@@ -119,7 +120,6 @@ class TemiAgent:
         """
         Display the image matching the current conversation topic
         while Pepper is speaking — no speech from Temi.
-        Called at the start of each new topic to keep the screen relevant.
         """
         image_path = self._resolve_image(topic)
         self._show_image(image_path)
@@ -140,21 +140,27 @@ class TemiAgent:
 
     def _show_image(self, path: str):
         if self._robot:
-            self._robot.media.show_image(path)
+            try:
+                self._robot.show_image(path)
+            except Exception as e:
+                log.warning("Temi show_image failed (continuing): %s", e)
 
     def _speak(self, text: str):
         if self._robot:
-            self._robot.tts.speak(text)
+            try:
+                self._robot.say(text)
+            except Exception as e:
+                log.warning("Temi say failed (continuing): %s", e)
 
     def _delivery_speech(self, topic: str) -> str:
         """Returns a short Temi speech line for each flyer topic."""
         scripts = {
-            "erasmus":            "Here is the Erasmus+ and partner university overview. Please take a flyer from my tray!",
-            "partner_universities":"Here is the list of partner universities worldwide. Feel free to take one!",
-            "language_courses":   "Here is the Sprachenzentrum course overview. Take a flyer from my tray!",
-            "housing":            "Here is the housing guide for students. Please take one from my tray!",
-            "health_insurance":   "Here is the health insurance information. Take a flyer from my tray!",
-            "outgoing_process":   "Here are the steps to apply for a semester abroad. Please take one!",
+            "erasmus":             "Here is the Erasmus+ and partner university overview. Please take a flyer from my tray!",
+            "partner_universities": "Here is the list of partner universities worldwide. Feel free to take one!",
+            "language_courses":    "Here is the Sprachenzentrum course overview. Take a flyer from my tray!",
+            "housing":             "Here is the housing guide for students. Please take one from my tray!",
+            "health_insurance":    "Here is the health insurance information. Take a flyer from my tray!",
+            "outgoing_process":    "Here are the steps to apply for a semester abroad. Please take one!",
         }
         return scripts.get(
             topic,

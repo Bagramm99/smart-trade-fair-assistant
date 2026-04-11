@@ -117,14 +117,16 @@ def main():
     # 2. Main event loop
     while True:
 
+        
         # ── Wait for a face ────────────────────────────────────────────────────
-        log.debug("Scanning for visitors ...")
-        if not pepper.detect_face():
-            time.sleep(1)
-            continue
+               # log.debug("Scanning for visitors ...")
+                # if not pepper.detect_face():
+                  #  time.sleep(1)
+                   # continue
 
-        log.info("Visitor detected!")
-
+               # log.info("Visitor detected!")
+        input("  [Press Enter when visitor is ready]: ")
+        
         # ── Get visitor ID via QR code (optional) ──────────────────────────────
         visitor_id = pepper.scan_qr_code()
         if visitor_id is None:
@@ -147,7 +149,7 @@ def main():
                 break
 
             # Listen for visitor speech
-            visitor_text = listen_whisper(duration=6.0)
+            visitor_text = input("  [TYPE visitor input]: ").strip() or None
 
             if not visitor_text:
                 continue
