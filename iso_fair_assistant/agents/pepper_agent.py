@@ -9,7 +9,6 @@ import config
 
 log = logging.getLogger("pepper")
 
-
 class PepperAgent:
     """
     Wraps PepperRobot with ISO-specific behaviour.

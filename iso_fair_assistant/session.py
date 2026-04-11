@@ -2,7 +2,6 @@
 #
 # Keeps an in-memory record of who has already been helped today.
 # Resets when the program restarts (fine for a one-day demo).
-
 import time
 import random
 import string
@@ -28,7 +27,7 @@ class SessionManager:
         suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
         return f"STU-{suffix}"
 
-    # ── Session logic ─────────────────────────────────────────────────────────
+    # ── Session logic ──────────────────────────────────────────────────────────
 
     def is_known(self, visitor_id: str) -> bool:
         return visitor_id in self._sessions
@@ -66,6 +65,25 @@ class SessionManager:
         return self._sessions.get(visitor_id, {}).get("topics", [])
 
     def stats(self) -> dict:
-        total   = len(self._sessions)
-        helped  = sum(1 for s in self._sessions.values() if s["helped"])
-        return {"total_visitors": total, "helped": helped, "still_active": total - helped}
+        total  = len(self._sessions)
+        helped = sum(1 for s in self._sessions.values() if s["helped"])
+        return {
+            "total_visitors": total,
+            "helped": helped,
+            "still_active": total - helped,
+        }
+
+    def get_session_duration(self, visitor_id: str) -> float:
+        """Returns how long the visitor has been at the stand in seconds."""
+        if visitor_id in self._sessions:
+            return time.time() - self._sessions[visitor_id]["first_seen"]
+        return 0.0
+
+    def get_all_visitor_ids(self) -> list:
+        """Returns a list of all visitor IDs seen today."""
+        return list(self._sessions.keys())
+
+    def reset(self):
+        """Clear all sessions — call at the start of each fair day."""
+        self._sessions = {}
+        log.info("All sessions reset.")

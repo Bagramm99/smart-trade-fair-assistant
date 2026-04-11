@@ -1,11 +1,11 @@
 # ── Robot IPs ──
-PEPPER_IP = "172.30.36.42" # from professor's test file
-TEMI_IP   = "172.30.36.32" # your machine's IP on the same network
+PEPPER_IP = "172.30.36.41" # from professor's test file
+TEMI_IP   = "172.30.36.31" # your machine's IP on the same network
 LOCAL_IP  = "0.0.0.0" # replace once you have Temi's IP
 
 # ── LLM ──
 LLM_MODEL = "gpt-4o-mini"
-OPENAI_API_KEY  = "YOUR_KEY_HERE"   # or set env var OPENAI_API_KEY
+OPENAI_API_KEY  = ""   # or set env var OPENAI_API_KEY
 LLM_TEMPERATURE = 0.3
 
 # TODO: I am actually unsure if we do have an API KEY for OPEN AI, do you guys remember what the professor said?
