@@ -25,14 +25,20 @@ class _TemiStub:
             print(f"[Temi NAV] Moving to '{location}'")
 
     class _Media:
-        def show_image(self, path: str):
-            print(f"[Temi SCREEN] Displaying: {os.path.basename(path)}")
+        def show_image(self, url: str):
+            print(f"[Temi SCREEN] Displaying URL: {url}")
 
     def __init__(self, ip: str, port: int = 7070):
         self.tts        = self._TTS()
         self.navigation = self._Navigation()
         self.media      = self._Media()
         print(f"[Temi] Stub connected ({ip}:{port})")
+
+    def show_image(self, url: str):
+        print(f"[Temi SCREEN] Displaying URL: {url}")
+
+    def say(self, text: str):
+        print(f"[Temi TTS] {text}")
 
     def follow_me(self):
         print("[Temi] Following visitor")
@@ -108,11 +114,11 @@ class TemiAgent:
         Display the image for the topic and say the delivery line.
         Returns True on success. Called after Pepper asks for permission.
         """
-        image_path = self._resolve_image(topic)
-        speech     = self._delivery_speech(topic)
+        image_url = self._resolve_image(topic)
+        speech    = self._delivery_speech(topic)
 
-        log.info("Temi delivering flyer for topic: %s", topic)
-        self._show_image(image_path)
+        log.info("Temi delivering flyer for topic '%s' → %s", topic, image_url)
+        self._show_image(image_url)
         self._speak(speech)
         return True
 
@@ -121,9 +127,9 @@ class TemiAgent:
         Display the image matching the current conversation topic
         while Pepper is speaking — no speech from Temi.
         """
-        image_path = self._resolve_image(topic)
-        self._show_image(image_path)
-        log.debug("Temi screen updated: %s", image_path)
+        image_url = self._resolve_image(topic)
+        self._show_image(image_url)
+        log.debug("Temi screen updated: %s", image_url)
 
     def show_welcome(self):
         """Display the ISO contact card at stand startup."""
@@ -135,13 +141,23 @@ class TemiAgent:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_image(self, topic: str) -> str:
-        filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
-        return os.path.join(config.TEMI_ASSETS_DIR, filename)
+        """
+        Returns an HTTP URL that Temi can reach over the Roboter-WLAN.
 
-    def _show_image(self, path: str):
+        The Python HTTP server must be running on Windows (NOT WSL!):
+            cd <project>/iso_fair_assistant
+            python -m http.server 8082 --bind 172.30.36.107
+
+        Temi then fetches:
+            http://172.30.36.107:8082/assets/temi_screens/<filename>
+        """
+        filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
+        return f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}/assets/temi_screens/{filename}"
+
+    def _show_image(self, url: str):
         if self._robot:
             try:
-                self._robot.show_image(path)
+                self._robot.show_image(url)
             except Exception as e:
                 log.warning("Temi show_image failed (continuing): %s", e)
 
@@ -155,12 +171,12 @@ class TemiAgent:
     def _delivery_speech(self, topic: str) -> str:
         """Returns a short Temi speech line for each flyer topic."""
         scripts = {
-            "erasmus":             "Here is the Erasmus+ and partner university overview. Please take a flyer from my tray!",
+            "erasmus":              "Here is the Erasmus+ and partner university overview. Please take a flyer from my tray!",
             "partner_universities": "Here is the list of partner universities worldwide. Feel free to take one!",
-            "language_courses":    "Here is the Sprachenzentrum course overview. Take a flyer from my tray!",
-            "housing":             "Here is the housing guide for students. Please take one from my tray!",
-            "health_insurance":    "Here is the health insurance information. Take a flyer from my tray!",
-            "outgoing_process":    "Here are the steps to apply for a semester abroad. Please take one!",
+            "language_courses":     "Here is the Sprachenzentrum course overview. Take a flyer from my tray!",
+            "housing":              "Here is the housing guide for students. Please take one from my tray!",
+            "health_insurance":     "Here is the health insurance information. Take a flyer from my tray!",
+            "outgoing_process":     "Here are the steps to apply for a semester abroad. Please take one!",
         }
         return scripts.get(
             topic,
