@@ -2,6 +2,8 @@
 #
 # Central configuration. Import this module everywhere instead of
 # hardcoding IPs or paths in individual agent files.
+#import dotenv
+#import os
 
 # ── Robot IPs ──────────────────────────────────────────────────────────────────
 PEPPER_IP = "172.30.36.41"   # from professor's test file (try .42 as fallback)
@@ -10,7 +12,7 @@ LOCAL_IP  = "172.30.36.107"  # Windows IP
 
 # ── LLM ────────────────────────────────────────────────────────────────────────
 LLM_MODEL       = "gpt-4o-mini"
-OPENAI_API_KEY  = ""   # set via .env — do NOT commit the key!
+OPENAI_API_KEY  =  "" #os.getenv("OPENAI_API_KEY")   # set via .env — do NOT commit the key!
 LLM_TEMPERATURE = 0.3
 
 # ── Knowledge base ─────────────────────────────────────────────────────────────

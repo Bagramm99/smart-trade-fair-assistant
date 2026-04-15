@@ -1,47 +1,75 @@
 # agents/temi_agent.py
 #
-# Temi integration. The pytemi library is not yet available (Linux x86 wheel).
-# This file has a real interface and a stub that mirrors what pytemi will expose.
-# Swap the stub class for `from pytemi import TemiRobot` when the library arrives.
+# Temi integration via TemiRest HTTP API (port 8080).
+#
+# Confirmed REST endpoints:
+#   GET  /locations                                    → list saved locations
+#   POST /goto      {"text": "entrance"}               → navigate to location
+#   POST /say       {"text": "...", "language": "en"}  → speak via TTS
+#   POST /img       {"text": "http://..."}             → display image URL
+#   POST /txt       {"text": "..."}                    → display text on screen
 
 import logging
-import os
+import time
+import threading
+import requests
 import config
 
 log = logging.getLogger("temi")
 
+# ── Temi REST helpers ─────────────────────────────────────────────────────────
 
-# ── Stub (remove when pytemi is installed) ────────────────────────────────────
+TEMI_BASE_URL = f"http://{config.TEMI_IP}:8080"
+
+
+def _temi_goto(location: str):
+    """Send Temi to a saved location via REST API."""
+    try:
+        resp = requests.post(
+            f"{TEMI_BASE_URL}/goto",
+            json={"text": location},
+            timeout=5,
+        )
+        log.info("Temi goto '%s' → HTTP %s", location, resp.status_code)
+    except Exception as e:
+        log.warning("Temi goto failed: %s", e)
+
+
+def _temi_say(text: str, language: str = "en"):
+    """Tell Temi to speak via REST API."""
+    try:
+        resp = requests.post(
+            f"{TEMI_BASE_URL}/say",
+            json={"text": text, "language": language},
+            timeout=5,
+        )
+        log.info("Temi say → HTTP %s", resp.status_code)
+    except Exception as e:
+        log.warning("Temi say failed: %s", e)
+
+
+def _temi_show_image(image_url: str):
+    """
+    Tell Temi to display an image from a URL.
+    Endpoint /img with {"text": url} — confirmed working (HTTP 500 is a
+    server-side log issue but Temi fetches and displays the image correctly).
+    """
+    try:
+        resp = requests.post(
+            f"{TEMI_BASE_URL}/img",
+            json={"text": image_url},
+            timeout=5,
+        )
+        log.info("Temi img → HTTP %s | URL: %s", resp.status_code, image_url)
+    except Exception as e:
+        log.warning("Temi img failed: %s", e)
+
+
+# ── Stub (used when pytemi is not installed) ──────────────────────────────────
 
 class _TemiStub:
-    """Mirrors the expected pytemi interface. Prints actions instead of calling hardware."""
-
-    class _TTS:
-        def speak(self, text: str):
-            print(f"[Temi TTS] {text}")
-
-    class _Navigation:
-        def go_to(self, location: str):
-            print(f"[Temi NAV] Moving to '{location}'")
-
-    class _Media:
-        def show_image(self, url: str):
-            print(f"[Temi SCREEN] Displaying URL: {url}")
-
     def __init__(self, ip: str, port: int = 7070):
-        self.tts        = self._TTS()
-        self.navigation = self._Navigation()
-        self.media      = self._Media()
         print(f"[Temi] Stub connected ({ip}:{port})")
-
-    def show_image(self, url: str):
-        print(f"[Temi SCREEN] Displaying URL: {url}")
-
-    def say(self, text: str):
-        print(f"[Temi TTS] {text}")
-
-    def follow_me(self):
-        print("[Temi] Following visitor")
 
     def stop(self):
         print("[Temi] Stopped")
@@ -54,7 +82,7 @@ try:
     log.info("pytemi library found — using real hardware.")
 except ImportError:
     _TemiBackend = _TemiStub
-    log.warning("pytemi not installed — using stub. Replace when library is available.")
+    log.warning("pytemi not installed — using REST API directly.")
 
 
 # ── Topic → image mapping ─────────────────────────────────────────────────────
@@ -77,12 +105,37 @@ TOPIC_IMAGES = {
     "farewell":              "iso_contact_card.png",
 }
 
+# ── Temi speech scripts per topic ─────────────────────────────────────────────
+
+DELIVERY_SCRIPTS = {
+    "erasmus":               "Hi! I am Temi. I have information about Erasmus and our partner universities. Please take a flyer from my tray!",
+    "partner_universities":  "Hi! I am Temi. Here is the full list of our partner universities worldwide. Feel free to take one!",
+    "language_courses":      "Hi! I am Temi. I have the Sprachenzentrum language course overview for you. Take a flyer from my tray!",
+    "housing":               "Hi! I am Temi. Here is the housing guide for exchange students. Please take one from my tray!",
+    "health_insurance":      "Hi! I am Temi. I have health insurance information for you. Take a flyer from my tray!",
+    "outgoing_process":      "Hi! I am Temi. Here are the steps to apply for a semester abroad. Please take one!",
+    "europe_partners":       "Hi! I am Temi. Here is the overview of our Erasmus partners in Europe. Take a flyer!",
+    "non_eu_partners":       "Hi! I am Temi. Here are our non-European partner universities. Please take a flyer!",
+}
+
+DELIVERY_DEFAULT = (
+    "Hi! I am Temi, your information assistant. "
+    "Here is some information for you. Please take a flyer from my tray!"
+)
+
+# ── Navigation constants ──────────────────────────────────────────────────────
+
+LOCATION_VISITOR = "entrance"   # saved position ~2 meters toward visitor
+LOCATION_HOME    = "home base"  # Temi's starting position at the stand
+TRAVEL_WAIT_SEC  = 5            # seconds to wait for Temi to arrive
+FLYER_WAIT_SEC   = 30           # seconds Temi waits at visitor position
+
 
 class TemiAgent:
     """
     High-level controller for Temi.
+    Uses TemiRest HTTP API directly — no pytemi library needed.
     The orchestrator calls deliver_flyer() and show_topic_image().
-    Everything else stays internal.
     """
 
     def __init__(self):
@@ -111,28 +164,60 @@ class TemiAgent:
 
     def deliver_flyer(self, topic: str) -> bool:
         """
-        Display the image for the topic and say the delivery line.
-        Returns True on success. Called after Pepper asks for permission.
+        Full flyer delivery sequence (runs in background thread):
+          1. Show topic image immediately
+          2. Drive to 'entrance' (~2 meters toward visitor)
+          3. Wait for arrival (5s)
+          4. Speak topic info aloud
+          5. Wait 30s so visitor can take flyer
+          6. Return to 'home base'
+        Returns True immediately — navigation runs in background.
         """
         image_url = self._resolve_image(topic)
-        speech    = self._delivery_speech(topic)
+        speech    = DELIVERY_SCRIPTS.get(topic, DELIVERY_DEFAULT)
 
-        log.info("Temi delivering flyer for topic '%s' → %s", topic, image_url)
-        self._show_image(image_url)
-        self._speak(speech)
+        log.info("Temi starting flyer delivery for topic '%s'", topic)
+
+        # Show image immediately
+        _temi_show_image(image_url)
+
+        # Navigate + speak in background thread
+        thread = threading.Thread(
+            target=self._delivery_sequence,
+            args=(speech, image_url),
+            daemon=True,
+        )
+        thread.start()
         return True
 
+    def _delivery_sequence(self, speech: str, image_url: str):
+        """Background: goto entrance → wait → speak → wait 30s → goto home base."""
+        log.info("Temi → navigating to '%s'", LOCATION_VISITOR)
+        _temi_goto(LOCATION_VISITOR)
+
+        # Wait for Temi to physically arrive
+        time.sleep(TRAVEL_WAIT_SEC)
+
+        # Speak and refresh image at visitor position
+        _temi_say(speech)
+        _temi_show_image(image_url)
+
+        log.info("Temi → waiting %ds for visitor to take flyer ...", FLYER_WAIT_SEC)
+        time.sleep(FLYER_WAIT_SEC)
+
+        # Return to stand
+        log.info("Temi → returning to '%s'", LOCATION_HOME)
+        _temi_goto(LOCATION_HOME)
+        log.info("Temi → back at home base.")
+
     def show_topic_image(self, topic: str):
-        """
-        Display the image matching the current conversation topic
-        while Pepper is speaking — no speech from Temi.
-        """
+        """Display topic image while Pepper speaks — no navigation."""
         image_url = self._resolve_image(topic)
-        self._show_image(image_url)
+        _temi_show_image(image_url)
         log.debug("Temi screen updated: %s", image_url)
 
     def show_welcome(self):
-        """Display the ISO contact card at stand startup."""
+        """Display ISO contact card at stand startup."""
         self.show_topic_image("welcome")
 
     def show_farewell(self):
@@ -141,44 +226,9 @@ class TemiAgent:
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_image(self, topic: str) -> str:
-        """
-        Returns an HTTP URL that Temi can reach over the Roboter-WLAN.
-
-        The Python HTTP server must be running on Windows (NOT WSL!):
-            cd <project>/iso_fair_assistant
-            python -m http.server 8082 --bind 172.30.36.107
-
-        Temi then fetches:
-            http://172.30.36.107:8082/assets/temi_screens/<filename>
-        """
+        """Returns HTTP URL reachable by Temi over Roboter-WLAN."""
         filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
-        return f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}/assets/temi_screens/{filename}"
-
-    def _show_image(self, url: str):
-        if self._robot:
-            try:
-                self._robot.show_image(url)
-            except Exception as e:
-                log.warning("Temi show_image failed (continuing): %s", e)
-
-    def _speak(self, text: str):
-        if self._robot:
-            try:
-                self._robot.say(text)
-            except Exception as e:
-                log.warning("Temi say failed (continuing): %s", e)
-
-    def _delivery_speech(self, topic: str) -> str:
-        """Returns a short Temi speech line for each flyer topic."""
-        scripts = {
-            "erasmus":              "Here is the Erasmus+ and partner university overview. Please take a flyer from my tray!",
-            "partner_universities": "Here is the list of partner universities worldwide. Feel free to take one!",
-            "language_courses":     "Here is the Sprachenzentrum course overview. Take a flyer from my tray!",
-            "housing":              "Here is the housing guide for students. Please take one from my tray!",
-            "health_insurance":     "Here is the health insurance information. Take a flyer from my tray!",
-            "outgoing_process":     "Here are the steps to apply for a semester abroad. Please take one!",
-        }
-        return scripts.get(
-            topic,
-            "Here is some information for you. Please take a flyer from my tray!"
+        return (
+            f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"
+            f"/assets/temi_screens/{filename}"
         )
