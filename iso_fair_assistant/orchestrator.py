@@ -195,12 +195,41 @@ class Orchestrator:
         Uses keyword detection on Pepper's microphone.
         """
         topic_label = flyer_topic.replace("_", " ")
-        self._pepper.announce_temi_handoff(topic_label)
 
-        answer = self._pepper.listen_for_speech(["yes", "no", "sure", "okay", "nope"])
-        if answer and answer.lower() in ("yes", "sure", "okay"):
+        # Useful for demos when keyword capture is unreliable in noisy fair halls.
+        if config.AUTO_ACCEPT_FLYER:
+            log.info("AUTO_ACCEPT_FLYER enabled — skipping voice confirmation.")
             self._temi.deliver_flyer(flyer_topic)
             self._pepper.temi_returned()
+            return
+
+        self._pepper.announce_temi_handoff(topic_label)
+        self._pepper.say(
+            "Would you like me to ask Temi to bring it now? "
+            "Please say yes or no.",
+            animated=True,
+        )
+
+        answer = self._pepper.listen_for_speech(
+            ["yes", "yeah", "yep", "no", "sure", "okay", "nope"]
+        )
+
+        if answer is None and config.ENABLE_TYPED_FALLBACK:
+            try:
+                typed = input("  [Pepper did not catch yes/no. TYPE yes or no]: ").strip().lower()
+                answer = typed if typed else None
+            except (EOFError, KeyboardInterrupt):
+                answer = None
+
+        log.info("Flyer confirmation heard: %s", answer)
+        if answer and answer.lower() in ("yes", "yeah", "yep", "sure", "okay"):
+            self._temi.deliver_flyer(flyer_topic)
+            self._pepper.temi_returned()
+        elif answer is None:
+            self._pepper.say(
+                "I did not catch your answer, so I will not send Temi yet. "
+                f"You can also take the {topic_label} flyer from the table next to Temi."
+            )
         else:
             self._pepper.say(
                 f"No problem! You can find the {topic_label} flyers on the table next to Temi."

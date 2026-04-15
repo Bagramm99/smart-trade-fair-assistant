@@ -10,8 +10,12 @@
 #   POST /txt       {"text": "..."}                    → display text on screen
 
 import logging
+import socket
+import subprocess
+import sys
 import time
 import threading
+from pathlib import Path
 import requests
 import config
 
@@ -20,49 +24,123 @@ log = logging.getLogger("temi")
 # ── Temi REST helpers ─────────────────────────────────────────────────────────
 
 TEMI_BASE_URL = f"http://{config.TEMI_IP}:8080"
+HTTP_CONNECT_TIMEOUT = 3
+HTTP_READ_TIMEOUT_SHORT = 8
+HTTP_READ_TIMEOUT_GOTO = 45
+
+
+def _is_tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Best-effort local check whether host:port is listening."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _tablet_server_running(port: int) -> bool:
+    """Check common hosts where the local server may be bound."""
+    hosts = ["127.0.0.1", "localhost", config.LOCAL_IP]
+    return any(_is_tcp_port_open(host, port) for host in hosts)
+
+
+def _temi_get(path: str, read_timeout: int = HTTP_READ_TIMEOUT_SHORT):
+    """GET helper with consistent timeout and error logging."""
+    url = f"{TEMI_BASE_URL}{path}"
+    try:
+        return requests.get(url, timeout=(HTTP_CONNECT_TIMEOUT, read_timeout))
+    except Exception as e:
+        log.warning("Temi GET %s failed: %s", url, e)
+        return None
+
+
+def _temi_post(path: str, payload: dict, read_timeout: int):
+    """POST helper with consistent timeout and error logging."""
+    url = f"{TEMI_BASE_URL}{path}"
+    try:
+        return requests.post(url, json=payload, timeout=(HTTP_CONNECT_TIMEOUT, read_timeout))
+    except Exception as e:
+        log.warning("Temi POST %s failed with payload %s: %s", url, payload, e)
+        return None
+
+
+def _temi_locations() -> list[str] | None:
+    """Returns saved Temi locations, or None if unavailable."""
+    resp = _temi_get("/locations")
+    if resp is None:
+        return None
+    try:
+        data = resp.json()
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        return None
+    except Exception:
+        return None
 
 
 def _temi_goto(location: str):
     """Send Temi to a saved location via REST API."""
-    try:
-        resp = requests.post(
-            f"{TEMI_BASE_URL}/goto",
-            json={"text": location},
-            timeout=5,
+    known_locations = _temi_locations()
+    if known_locations is not None and location not in known_locations:
+        log.error(
+            "Temi goto target '%s' not found. Available locations: %s",
+            location,
+            known_locations,
         )
-        log.info("Temi goto '%s' → HTTP %s", location, resp.status_code)
-    except Exception as e:
-        log.warning("Temi goto failed: %s", e)
+        return
+
+    resp = _temi_post("/goto", {"text": location}, read_timeout=HTTP_READ_TIMEOUT_GOTO)
+    if resp is None:
+        return
+    log.info("Temi goto '%s' -> HTTP %s", location, resp.status_code)
 
 
 def _temi_say(text: str, language: str = "en"):
     """Tell Temi to speak via REST API."""
-    try:
-        resp = requests.post(
-            f"{TEMI_BASE_URL}/say",
-            json={"text": text, "language": language},
-            timeout=5,
-        )
-        log.info("Temi say → HTTP %s", resp.status_code)
-    except Exception as e:
-        log.warning("Temi say failed: %s", e)
+    resp = _temi_post("/say", {"text": text, "language": language}, read_timeout=HTTP_READ_TIMEOUT_SHORT)
+    if resp is None:
+        return
+    log.info("Temi say -> HTTP %s", resp.status_code)
 
 
-def _temi_show_image(image_url: str):
+def _temi_show_image(image_url: str) -> bool:
     """
     Tell Temi to display an image from a URL.
     Endpoint /img with {"text": url} — confirmed working (HTTP 500 is a
     server-side log issue but Temi fetches and displays the image correctly).
     """
-    try:
-        resp = requests.post(
-            f"{TEMI_BASE_URL}/img",
-            json={"text": image_url},
-            timeout=5,
-        )
-        log.info("Temi img → HTTP %s | URL: %s", resp.status_code, image_url)
-    except Exception as e:
-        log.warning("Temi img failed: %s", e)
+    # Some TemiRest builds differ in payload schema. Try common variants.
+    variants = [
+        {"text": image_url},
+        {"url": image_url},
+        {"text": image_url, "id": "main"},
+    ]
+
+    for payload in variants:
+        resp = _temi_post("/img", payload, read_timeout=HTTP_READ_TIMEOUT_SHORT)
+        if resp is None:
+            continue
+        if resp.status_code < 400:
+            log.info("Temi img -> HTTP %s | payload=%s", resp.status_code, payload)
+            return True
+
+        body = (resp.text or "").strip()
+        if body:
+            log.warning(
+                "Temi img returned HTTP %s | payload=%s | body=%s",
+                resp.status_code,
+                payload,
+                body[:240],
+            )
+        else:
+            log.warning(
+                "Temi img returned HTTP %s (empty body) | payload=%s",
+                resp.status_code,
+                payload,
+            )
+
+    log.error("Temi failed to display image after all payload variants. URL: %s", image_url)
+    return False
 
 
 # ── Stub (used when pytemi is not installed) ──────────────────────────────────
@@ -140,13 +218,71 @@ class TemiAgent:
 
     def __init__(self):
         self._robot = None
+        self._asset_server_proc: subprocess.Popen | None = None
+
+    def _ensure_tablet_server(self):
+        """Start local static server for Temi images if enabled and not running."""
+        if not config.AUTO_START_TABLET_SERVER:
+            return
+
+        if _tablet_server_running(config.TABLET_SERVER_PORT):
+            return
+
+        base_dir = Path(__file__).resolve().parents[1]
+        cmd = [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(config.TABLET_SERVER_PORT),
+            "--bind",
+            "0.0.0.0",
+            "--directory",
+            str(base_dir),
+        ]
+        try:
+            self._asset_server_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(20):
+                if _tablet_server_running(config.TABLET_SERVER_PORT):
+                    log.info(
+                        "Started local tablet server at http://%s:%s",
+                        config.LOCAL_IP,
+                        config.TABLET_SERVER_PORT,
+                    )
+                    return
+                if self._asset_server_proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+
+            stderr = ""
+            if self._asset_server_proc and self._asset_server_proc.stderr:
+                try:
+                    stderr = self._asset_server_proc.stderr.read().strip()
+                except Exception:
+                    stderr = ""
+            log.warning(
+                "Local tablet server did not come up on port %s. %s",
+                config.TABLET_SERVER_PORT,
+                stderr[:220],
+            )
+        except Exception as e:
+            log.warning("Failed to start local tablet server: %s", e)
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def connect(self) -> bool:
         try:
+            self._ensure_tablet_server()
             self._robot = _TemiBackend(config.TEMI_IP)
-            log.info("Temi ready.")
+            locations = _temi_locations()
+            if not locations:
+                log.error("Temi REST not ready at %s (no locations response).", TEMI_BASE_URL)
+                return False
+            log.info("Temi ready. Locations available: %s", locations)
             return True
         except Exception as e:
             log.error("Temi connection failed: %s", e)
@@ -159,6 +295,14 @@ class TemiAgent:
             except Exception:
                 pass
             log.info("Temi disconnected.")
+
+        if self._asset_server_proc and self._asset_server_proc.poll() is None:
+            self._asset_server_proc.terminate()
+            try:
+                self._asset_server_proc.wait(timeout=2)
+            except Exception:
+                self._asset_server_proc.kill()
+            log.info("Local tablet server stopped.")
 
     # ── Main actions called by orchestrator ────────────────────────────────────
 
@@ -179,7 +323,8 @@ class TemiAgent:
         log.info("Temi starting flyer delivery for topic '%s'", topic)
 
         # Show image immediately
-        _temi_show_image(image_url)
+        if not _temi_show_image(image_url):
+            _temi_say("I cannot show the image on my screen right now, but I can still help you with the flyer.")
 
         # Navigate + speak in background thread
         thread = threading.Thread(
@@ -200,7 +345,8 @@ class TemiAgent:
 
         # Speak and refresh image at visitor position
         _temi_say(speech)
-        _temi_show_image(image_url)
+        if not _temi_show_image(image_url):
+            _temi_say("My screen is currently unavailable.")
 
         log.info("Temi → waiting %ds for visitor to take flyer ...", FLYER_WAIT_SEC)
         time.sleep(FLYER_WAIT_SEC)
@@ -213,8 +359,10 @@ class TemiAgent:
     def show_topic_image(self, topic: str):
         """Display topic image while Pepper speaks — no navigation."""
         image_url = self._resolve_image(topic)
-        _temi_show_image(image_url)
-        log.debug("Temi screen updated: %s", image_url)
+        if _temi_show_image(image_url):
+            log.debug("Temi screen updated: %s", image_url)
+        else:
+            log.warning("Temi screen not updated: %s", image_url)
 
     def show_welcome(self):
         """Display ISO contact card at stand startup."""
@@ -228,7 +376,8 @@ class TemiAgent:
     def _resolve_image(self, topic: str) -> str:
         """Returns HTTP URL reachable by Temi over Roboter-WLAN."""
         filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
+        prefix = "/" + config.TEMI_ASSETS_URL_PREFIX.strip("/")
         return (
             f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"
-            f"/assets/temi_screens/{filename}"
+            f"{prefix}/{filename}"
         )

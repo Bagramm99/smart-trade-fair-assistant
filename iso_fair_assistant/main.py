@@ -148,8 +148,15 @@ def main():
                 session_active = False
                 break
 
-            # Listen for visitor speech
-            visitor_text = input("  [TYPE visitor input]: ").strip() or None
+            # Listen for visitor speech (Whisper if available, keyboard fallback otherwise)
+            visitor_text = listen_whisper(duration=6.0)
+
+            if not visitor_text and config.ENABLE_TYPED_FALLBACK:
+                try:
+                    typed = input("  [No speech detected. TYPE visitor input or press Enter to skip]: ").strip()
+                    visitor_text = typed if typed else None
+                except (EOFError, KeyboardInterrupt):
+                    visitor_text = None
 
             if not visitor_text:
                 continue
