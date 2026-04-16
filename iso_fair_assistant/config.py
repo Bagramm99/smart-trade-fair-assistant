@@ -35,8 +35,9 @@ def _load_local_env() -> None:
 _load_local_env()
 
 # ── Robot IPs ──────────────────────────────────────────────────────────────────
-PEPPER_IP = "172.30.36.41"   # from professor's test file (try .42 as fallback)
-TEMI_IP   = "172.30.36.31"   # try .32 as fallback
+# PEPPER_IP = "172.30.36.41"   # PEPPER from professor's test file (try .42 as fallback)
+PEPPER_IP = "172.30.36.42" # SALT
+TEMI_IP   = "172.30.36.32"   # try .32 as fallback
 LOCAL_IP  = "172.30.36.206" # LINUX PC
 # LOCAL_IP  = "172.30.36.107"  # Windows IP 
 
