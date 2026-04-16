@@ -69,9 +69,19 @@ class Orchestrator:
         self._sessions = sessions
         self._history: list[dict] = []
         self._current_visitor: str | None = None
+        self._listen_fn = None   # injected from main.py after Whisper loads
 
         api_key = config.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", "")
         self._llm = OpenAI(api_key=api_key)
+
+    def set_listen_fn(self, fn):
+        """
+        Inject the Whisper listen function so the orchestrator can use it
+        for yes/no detection in _offer_flyer without importing main.py.
+        Called from main.py after Whisper initialises:
+            orchestrator.set_listen_fn(listen_whisper)
+        """
+        self._listen_fn = fn
 
     # ── Public interface ───────────────────────────────────────────────────────
 
@@ -192,11 +202,14 @@ class Orchestrator:
     def _offer_flyer(self, flyer_topic: str):
         """
         Ask visitor's permission, then trigger Temi if they say yes.
-        Uses keyword detection on Pepper's microphone.
+
+        Uses Whisper for yes/no detection instead of Pepper's NAOqi ASR —
+        NAOqi keyword recognition is unreliable in noisy fair environments
+        (consistently mishears "yes" as "no" etc). Whisper is much more accurate.
+        The listen function is injected at runtime from main.py via set_listen_fn().
         """
         topic_label = flyer_topic.replace("_", " ")
 
-        # Useful for demos when keyword capture is unreliable in noisy fair halls.
         if config.AUTO_ACCEPT_FLYER:
             log.info("AUTO_ACCEPT_FLYER enabled — skipping voice confirmation.")
             self._temi.deliver_flyer(flyer_topic)
@@ -210,19 +223,32 @@ class Orchestrator:
             animated=True,
         )
 
-        answer = self._pepper.listen_for_speech(
-            ["yes", "yeah", "yep", "no", "sure", "okay", "nope"]
-        )
+        # Use Whisper for yes/no — much more accurate than Pepper's built-in ASR
+        answer = None
+        if self._listen_fn is not None:
+            transcript = self._listen_fn(duration=5.0)   # short recording for yes/no
+            if transcript:
+                t = transcript.lower()
+                if any(w in t for w in ("yes", "yeah", "yep", "sure", "okay", "please", "go ahead")):
+                    answer = "yes"
+                elif any(w in t for w in ("no", "nope", "don't", "not", "skip")):
+                    answer = "no"
+                else:
+                    log.info("Whisper transcript did not match yes/no: '%s'", transcript)
 
+        # Fallback to keyboard if Whisper not available or nothing heard
         if answer is None and config.ENABLE_TYPED_FALLBACK:
             try:
                 typed = input("  [Pepper did not catch yes/no. TYPE yes or no]: ").strip().lower()
-                answer = typed if typed else None
+                if typed in ("yes", "y", "yeah", "sure"):
+                    answer = "yes"
+                elif typed in ("no", "n", "nope"):
+                    answer = "no"
             except (EOFError, KeyboardInterrupt):
                 answer = None
 
-        log.info("Flyer confirmation heard: %s", answer)
-        if answer and answer.lower() in ("yes", "yeah", "yep", "sure", "okay"):
+        log.info("Flyer confirmation: %s", answer)
+        if answer == "yes":
             self._temi.deliver_flyer(flyer_topic)
             self._pepper.temi_returned()
         elif answer is None:

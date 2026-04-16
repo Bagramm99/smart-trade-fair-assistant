@@ -44,9 +44,21 @@ try:
 
     _whisper_model = _whisper.load_model("base")
 
-    def listen_whisper(duration: float = 6.0, sample_rate: int = 16_000) -> str | None:
-        """Record `duration` seconds from the laptop mic and transcribe with Whisper."""
-        log.debug("Listening (%.0fs) ...", duration)
+    def listen_whisper(duration: float = 7.0, sample_rate: int = 16_000) -> str | None:
+        """
+        Record from the laptop mic and transcribe with Whisper.
+
+        Timing fixes:
+          - 0.5s delay after Pepper finishes speaking so the visitor has
+            a moment to start talking (Pepper's say() is blocking, so this
+            runs right after speech ends)
+          - Print a clear signal so the operator/visitor knows to speak now
+          - 7 seconds (was 6) gives a bit more room
+        """
+        import time as _time
+        _time.sleep(0.5)   # brief gap after Pepper stops talking
+        print("\n  🎤  Listening ... (speak now)", flush=True)
+
         audio = _sd.rec(
             int(duration * sample_rate),
             samplerate=sample_rate,
@@ -54,10 +66,15 @@ try:
             dtype="float32",
         )
         _sd.wait()
+        print("  ⏹  Done listening.", flush=True)
+
         flat = audio.flatten()
         result = _whisper_model.transcribe(flat, fp16=False, language="en")
         text = result["text"].strip()
-        log.info("Whisper heard: %s", text)
+        if text:
+            log.info("Whisper heard: %s", text)
+        else:
+            log.debug("Whisper heard nothing.")
         return text if text else None
 
     log.info("Whisper STT ready.")
@@ -107,6 +124,7 @@ def main():
     pepper.print_status()
 
     orchestrator = Orchestrator(pepper, temi, kb, sessions)
+    orchestrator.set_listen_fn(listen_whisper)   # use Whisper for yes/no too
 
     signal.signal(signal.SIGINT, lambda *_: _shutdown(pepper, temi))
 

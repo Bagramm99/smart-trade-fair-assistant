@@ -106,41 +106,39 @@ def _temi_say(text: str, language: str = "en"):
 def _temi_show_image(image_url: str) -> bool:
     """
     Tell Temi to display an image from a URL.
-    Endpoint /img with {"text": url} — confirmed working (HTTP 500 is a
-    server-side log issue but Temi fetches and displays the image correctly).
-    """
-    # Some TemiRest builds differ in payload schema. Try common variants.
-    variants = [
-        {"text": image_url},
-        {"url": image_url},
-        {"text": image_url, "id": "main"},
-    ]
 
-    for payload in variants:
-        resp = _temi_post("/img", payload, read_timeout=HTTP_READ_TIMEOUT_SHORT)
-        if resp is None:
-            continue
+    FIX: The /img endpoint expects:
+      - Content-Type: text/plain  (NOT application/json)
+      - Payload key: "image"      (NOT "text")
+    Previously we were sending json={"text": url} which caused the 500.
+    pytemi/robot.py line 258 confirms the correct format.
+    """
+    import json as _json
+
+    payload = {"image": image_url, "id": "iso-assistant"}
+    url = f"{TEMI_BASE_URL}/img"
+
+    try:
+        resp = requests.post(
+            url,
+            data=_json.dumps(payload),
+            headers={"Content-Type": "text/plain"},
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT_SHORT),
+        )
         if resp.status_code < 400:
-            log.info("Temi img -> HTTP %s | payload=%s", resp.status_code, payload)
+            log.info("Temi img -> HTTP %s | url=%s", resp.status_code, image_url)
             return True
 
-        body = (resp.text or "").strip()
-        if body:
-            log.warning(
-                "Temi img returned HTTP %s | payload=%s | body=%s",
-                resp.status_code,
-                payload,
-                body[:240],
-            )
-        else:
-            log.warning(
-                "Temi img returned HTTP %s (empty body) | payload=%s",
-                resp.status_code,
-                payload,
-            )
-
-    log.error("Temi failed to display image after all payload variants. URL: %s", image_url)
-    return False
+        log.error(
+            "Temi img returned HTTP %s | body=%s | image_url=%s",
+            resp.status_code,
+            (resp.text or "")[:300],
+            image_url,
+        )
+        return False
+    except Exception as e:
+        log.warning("Temi img POST failed: %s", e)
+        return False
 
 
 # ── Stub (used when pytemi is not installed) ──────────────────────────────────
