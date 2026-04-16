@@ -10,7 +10,7 @@ At each prompt:
 """
 
 import sys
-from pypepper import PepperRobot
+from iso_fair_assistant.pypepper import PepperRobot
 
 ROBOT_IP = "172.30.36.41"
 LOCAL_IP = "172.30.36.227"

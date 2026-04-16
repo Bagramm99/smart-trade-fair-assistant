@@ -5,7 +5,29 @@ Scrapes the Ostfalia ISO-relevant web pages and the PDF content we already
 have, cleans the text, and saves everything as plain .txt files that can
 be embedded for RAG.
 
-Run once before the fair:
+WHY THE ORIGINAL BROKE — two separate problems:
+
+  Problem 1 — 403 outside campus network
+    ostfalia.de blocks requests from non-university IPs.
+    You must run this script from inside the campus network:
+      • On a lab machine directly
+      • Via SSH into a lab machine (ask professor for access)
+      • Connected to the Ostfalia VPN
+    Outside campus you get a 403, the scraper catches no error,
+    and returns an almost-empty HTML shell → only the <h1> survives.
+
+  Problem 2 — JavaScript-rendered content
+    The Ostfalia CMS injects page content via JavaScript AFTER the
+    initial HTML loads. requests+BeautifulSoup never executes JS —
+    it only sees the empty shell, which is why you got exactly:
+        "Wege ins Ausland"   ← just the h1, nothing else
+
+  FIX: Use Selenium (headless Chrome) to load the page like a real
+    browser, wait for JS to finish, then extract the rendered HTML.
+    Falls back to requests+BS4 if Selenium is not available.
+
+Run once from inside the campus network:
+    pip install selenium requests beautifulsoup4
     python build_knowledge_base.py
 
 Output:
@@ -16,25 +38,181 @@ Output:
 import os
 import json
 import time
-import re
 import requests
 from bs4 import BeautifulSoup
 
 OUTPUT_DIR = "knowledge/raw_texts"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Realistic browser User-Agent — bare-bones strings get blocked
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (compatible; ISO-Fair-Bot/1.0; "
-        "Student research project TU Braunschweig)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
     )
 }
 
+# ── Selenium (JS-rendering) setup ─────────────────────────────────────────────
+
+_driver = None
+
+def _get_driver():
+    """
+    Launch headless Chrome once and reuse for all pages.
+    Requires: pip install selenium
+              Chrome or Chromium installed (available on Ostfalia lab machines).
+    Returns None if Selenium/Chrome is not available → falls back to requests.
+    """
+    global _driver
+    if _driver is not None:
+        return _driver
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+
+        opts = Options()
+        opts.add_argument("--headless")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument(f"user-agent={HEADERS['User-Agent']}")
+
+        _driver = webdriver.Chrome(options=opts)
+        print("  [Selenium] Headless Chrome ready.\n")
+        return _driver
+    except Exception as e:
+        print(f"  [Selenium] Not available: {e}")
+        print("  [Selenium] Falling back to requests (may get incomplete content).\n")
+        return None
+
+
+def _close_driver():
+    global _driver
+    if _driver:
+        _driver.quit()
+        _driver = None
+
+
+# ── Page fetching ─────────────────────────────────────────────────────────────
+
+def fetch_rendered(url: str) -> str:
+    """
+    Fetch a URL using headless Chrome (executes JavaScript).
+    Waits 3 seconds for JS to finish rendering before extracting HTML.
+    This is the correct approach for modern CMS sites like Ostfalia.
+    """
+    driver = _get_driver()
+    if driver is None:
+        return fetch_static(url)
+
+    try:
+        driver.get(url)
+        time.sleep(3)          # wait for JS to inject content into the DOM
+        return driver.page_source
+    except Exception as e:
+        return f"[SELENIUM ERROR: {e}]"
+
+
+def fetch_static(url: str) -> str:
+    """
+    Fallback: plain requests. Works only if the site serves full HTML
+    server-side AND you are on the campus network. For Ostfalia, this
+    will usually only return the page title and navigation.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        return f"[SCRAPE ERROR: {e}]"
+
+
+# ── Text extraction ────────────────────────────────────────────────────────────
+
+# CSS selectors for elements that are pure noise (nav, menus, cookie banners)
+NOISE_SELECTORS = [
+    "nav", "header", "footer",
+    ".cookie-banner", ".cookie-notice",
+    "script", "style",
+    ".navigation", ".breadcrumb",
+    ".menu", ".sidebar",
+    # Ostfalia-specific nav/menu classes
+    ".nav-main", ".nav-meta", ".social-links",
+]
+
+def extract_text(html: str) -> str:
+    """
+    Parse rendered HTML, strip noise, extract main content text.
+    Tries Ostfalia-specific content selectors before falling back to <body>.
+    """
+    if html.startswith("["):
+        # Error message from fetch functions — pass through as-is
+        return html
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Remove noise
+    for selector in NOISE_SELECTORS:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    # Try content-area selectors in priority order
+    # Ostfalia uses #inhalt as the main content anchor
+    main = (
+        soup.select_one("#inhalt")        or
+        soup.select_one(".ce-bodytext")   or
+        soup.select_one("main")           or
+        soup.select_one("article")        or
+        soup.select_one('[role="main"]')  or
+        soup.select_one(".content")       or
+        soup.body
+    )
+
+    raw = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
+    return clean_text(raw)
+
+
+def clean_text(raw: str) -> str:
+    """Collapse whitespace and remove lines that are clearly navigation leftovers."""
+    lines = [l.strip() for l in raw.splitlines()]
+
+    # Drop very short lines (single words / numbers) — usually nav remnants
+    lines = [l for l in lines if len(l) > 4]
+
+    # Collapse consecutive blank lines to one
+    cleaned, prev_blank = [], False
+    for line in lines:
+        if not line:
+            if not prev_blank:
+                cleaned.append("")
+            prev_blank = True
+        else:
+            cleaned.append(line)
+            prev_blank = False
+
+    return "\n".join(cleaned).strip()
+
+
+# ── Save ───────────────────────────────────────────────────────────────────────
+
+def save(key: str, topic: str, url: str, text: str) -> dict:
+    path = os.path.join(OUTPUT_DIR, f"{key}.txt")
+    header = f"SOURCE: {url}\nTOPIC: {topic}\n{'='*60}\n\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(header + text)
+    char_count = len(text)
+    status = "⚠ ERROR" if text.startswith("[") else "✓"
+    print(f"  {status}  {key}.txt  ({char_count:,} chars)")
+    return {"key": key, "topic": topic, "url": url, "file": f"{key}.txt", "chars": char_count}
+
+
 # ── Pages to scrape ────────────────────────────────────────────────────────────
+
 PAGES = [
     {
         "key": "iso_main",
-        "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/international-student-office",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/international-student-office",
         "topic": "ISO overview, services, contact",
     },
     {
@@ -49,23 +227,48 @@ PAGES = [
     },
     {
         "key": "iso_incoming_path",
-        "url": "https://www.ostfalia.de/studieren/im-studium/international/studierende-aus-dem-ausland/dein-weg-an-die-ostfalia",
+        "url": "https://www.ostfalia.de/en/studying/at-university/international/international-students-and-applicants-welcome-at-ostfalia/your-way-to-ostfalia",
         "topic": "Step-by-step path for incoming international students",
     },
     {
         "key": "erasmus_outgoing",
-        "url": "https://www.ostfalia.de/studieren/im-studium/international/wege-ins-ausland",
+        "url": "https://www.ostfalia.de/en/studying/at-university/international/pathways-abroad",
         "topic": "Erasmus+ and ways to study abroad as an Ostfalia student",
     },
     {
+        "key": "language_center",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre",
+        "topic": "Information at Sprachenzentrum",
+    },
+    {
         "key": "language_courses",
-        "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/sprachenzentrum",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/language-course-offer",
         "topic": "Language courses at Sprachenzentrum",
     },
     {
         "key": "german_as_foreign_language",
         "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language",
+        "topic": "German as a foreign language (DaF) information for international students",
+    },
+    {
+        "key": "german_courses",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/german-courses-during-your-studies",
         "topic": "German as a foreign language (DaF) courses for international students",
+    },
+    {
+        "key": "dsh_german_certificate",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/dsh-exam-and-preparation-course",
+        "topic": "Information about the DSH german certificate for international students",
+    },
+    {
+        "key": "intensive_german_courses",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/intensive-courses-during-the-lecture-free-period",
+        "topic": "German as a foreign language (DaF) intensive courses during the summer for international students",
+    },
+    {
+        "key": "intercultural_offers",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/intercultural-offers",
+        "topic": "Intercultural offers at the university",
     },
     {
         "key": "sprachtandem",
@@ -73,20 +276,25 @@ PAGES = [
         "topic": "Language tandem program — practice German with a native speaker",
     },
     {
+        "key": "certificates",
+        "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/certificates-and-language-certificates",
+        "topic": "Language tandem program — practice German with a native speaker",
+    },
+    {
         "key": "housing",
-        "url": "https://www.ostfalia.de/studieren/studieninteressierte/wohnen",
+        "url": "https://www.ostfalia.de/en/studieren/studieninteressierte/living",
         "topic": "Student housing and accommodation options",
     },
     {
         "key": "studierenden_service",
         "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/studierenden-service",
-        "topic": "Student service office — general admin (redirect target for out-of-scope questions)",
+        "topic": "Student service office — redirect target for out-of-scope questions",
     },
 ]
 
-# TODO: Check URLS and get right URLS
+# ── Manually authored content (from PDF + known facts) ────────────────────────
+# This content does NOT need scraping — it goes straight to the knowledge base.
 
-# ── Manually authored content (from the PDF + what we know) ───────────────────
 MANUAL_TEXTS = [
     {
         "key": "partner_universities_informatik",
@@ -203,78 +411,32 @@ Studierenden-Service: ostfalia.de/hochschule/campus-einrichtungen/studierenden-s
 ]
 
 
-def clean_text(raw: str) -> str:
-    """Remove nav menus, footers, cookie banners and excess whitespace."""
-    # Remove extra blank lines
-    lines = [l.strip() for l in raw.splitlines()]
-    # Filter out very short lines that are likely nav items
-    lines = [l for l in lines if len(l) > 3]
-    # Collapse runs of blank lines
-    cleaned = []
-    prev_blank = False
-    for line in lines:
-        if not line:
-            if not prev_blank:
-                cleaned.append("")
-            prev_blank = True
-        else:
-            cleaned.append(line)
-            prev_blank = False
-    return "\n".join(cleaned).strip()
+# ── Main ───────────────────────────────────────────────────────────────────────
 
-
-def scrape_page(page: dict) -> str:
-    """Fetch and extract main content from an Ostfalia page."""
-    try:
-        resp = requests.get(page["url"], headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-    except Exception as e:
-        return f"[SCRAPE ERROR: {e}]"
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    # Remove noise elements
-    for tag in soup.select("nav, header, footer, .cookie-banner, script, style, .navigation, .breadcrumb"):
-        tag.decompose()
-
-    # Try to get main content area
-    main = (
-        soup.select_one("#inhalt") or
-        soup.select_one("main") or
-        soup.select_one("article") or
-        soup.select_one(".content") or
-        soup.body
-    )
-
-    text = main.get_text(separator="\n") if main else soup.get_text(separator="\n")
-    return clean_text(text)
-
-
-def save(key: str, topic: str, url: str, text: str):
-    path = os.path.join(OUTPUT_DIR, f"{key}.txt")
-    header = f"SOURCE: {url}\nTOPIC: {topic}\n{'='*60}\n\n"
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(header + text)
-    char_count = len(text)
-    print(f"  ✓  {key}.txt  ({char_count:,} chars)")
-    return {"key": key, "topic": topic, "url": url, "file": f"{key}.txt", "chars": char_count}
-
-
-# ── Run ────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Building ISO knowledge base...\n")
+    print("NOTE: Run this from inside the Ostfalia campus network (lab machine or VPN).\n")
     index = []
 
-    # 1. Scrape web pages
-    print("── Web pages ──")
+    # 1. Scrape web pages with JS rendering
+    print("── Web pages (using Selenium + headless Chrome) ──")
     for page in PAGES:
         print(f"  Fetching: {page['key']} ...")
-        text = scrape_page(page)
+        html = fetch_rendered(page["url"])
+        text = extract_text(html)
+
+        # Warn if we got suspiciously little content
+        if len(text) < 200 and not text.startswith("["):
+            print(f"  ⚠  Only {len(text)} chars — page may not have rendered fully.")
+            print(f"     Check that you are on the campus network and Chrome is installed.")
+
         entry = save(page["key"], page["topic"], page["url"], text)
         index.append(entry)
-        time.sleep(1.5)  # polite delay
+        time.sleep(2)   # polite delay between pages
 
-    # 2. Write manual/PDF-derived texts
+    _close_driver()
+
+    # 2. Write manual/PDF-derived texts (no scraping needed)
     print("\n── Manual / PDF-derived content ──")
     for item in MANUAL_TEXTS:
         entry = save(item["key"], item["topic"], "manual/pdf", item["text"])
@@ -282,10 +444,19 @@ if __name__ == "__main__":
 
     # 3. Save index
     index_path = "knowledge/summary.json"
+    os.makedirs("knowledge", exist_ok=True)
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
 
     total_chars = sum(e["chars"] for e in index)
     print(f"\nDone. {len(index)} files, {total_chars:,} total characters.")
     print(f"Index saved to: {index_path}")
-    print("\nNext step: run embed_knowledge_base.py to generate the vector index.")
+
+    # Report any pages that failed or returned too little
+    short = [e for e in index if e["chars"] < 200]
+    if short:
+        print(f"\n⚠  {len(short)} page(s) returned very little content:")
+        for e in short:
+            print(f"   - {e['key']} ({e['chars']} chars) — check URL and network access")
+
+    print("\nNext step: python embed_knowledge_base.py")

@@ -2,85 +2,127 @@
   {
     "key": "iso_main",
     "topic": "ISO overview, services, contact",
-    "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/international-student-office",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/international-student-office",
     "file": "iso_main.txt",
-    "chars": 28
+    "chars": 1081
   },
   {
     "key": "iso_incoming",
     "topic": "Incoming students, nomination, application process",
     "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/international-student-office/incoming-students",
     "file": "iso_incoming.txt",
-    "chars": 22
+    "chars": 961
   },
   {
     "key": "iso_fyi_integration",
-    "topic": "Integration support, first steps in Germany for international students",
-    "url": "https://www.ostfalia.de/en/studieren/im-studium/international/fyi-for-your-integration",
+    "topic": "Integration support for international students — FYI program",
+    "url": "https://www.ostfalia.de/studieren/im-studium/international/fyi-for-your-integration",
     "file": "iso_fyi_integration.txt",
-    "chars": 26
+    "chars": 1319
   },
   {
     "key": "iso_incoming_path",
-    "topic": "Step-by-step path for incoming international students",
-    "url": "https://www.ostfalia.de/studieren/im-studium/international/studierende-aus-dem-ausland/dein-weg-an-die-ostfalia",
+    "topic": "Step-by-step path for incoming international students at Ostfalia",
+    "url": "https://www.ostfalia.de/en/studying/at-university/international/international-students-and-applicants-welcome-at-ostfalia/your-way-to-ostfalia",
     "file": "iso_incoming_path.txt",
-    "chars": 24
+    "chars": 1334
   },
   {
     "key": "erasmus_outgoing",
     "topic": "Erasmus+ and ways to study abroad as an Ostfalia student",
-    "url": "https://www.ostfalia.de/studieren/im-studium/international/wege-ins-ausland",
+    "url": "https://www.ostfalia.de/en/studying/at-university/international/pathways-abroad",
     "file": "erasmus_outgoing.txt",
-    "chars": 16
+    "chars": 1593
+  },
+  {
+    "key": "language_center",
+    "topic": "Language Centre overview at Ostfalia (Sprachenzentrum)",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre",
+    "file": "language_center.txt",
+    "chars": 1147
   },
   {
     "key": "language_courses",
-    "topic": "Language courses at Sprachenzentrum",
-    "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/sprachenzentrum",
+    "topic": "Language courses at Sprachenzentrum — full course offer",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/language-course-offer",
     "file": "language_courses.txt",
-    "chars": 15
+    "chars": 1158
   },
   {
     "key": "german_as_foreign_language",
-    "topic": "German as a foreign language (DaF) courses for international students",
+    "topic": "German as a Foreign Language (DaF) at Ostfalia for international students",
     "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language",
     "file": "german_as_foreign_language.txt",
-    "chars": 28
+    "chars": 1751
+  },
+  {
+    "key": "german_courses",
+    "topic": "German courses during studies at Ostfalia for international students",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/german-courses-during-your-studies",
+    "file": "german_courses.txt",
+    "chars": 925
+  },
+  {
+    "key": "dsh_german_certificate",
+    "topic": "DSH German language exam and preparation course at Ostfalia",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/dsh-exam-and-preparation-course",
+    "file": "dsh_german_certificate.txt",
+    "chars": 966
+  },
+  {
+    "key": "intensive_german_courses",
+    "topic": "Intensive German courses during semester break at Ostfalia",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/german-as-a-foreign-language/intensive-courses-during-the-lecture-free-period",
+    "file": "intensive_german_courses.txt",
+    "chars": 869
+  },
+  {
+    "key": "intercultural_offers",
+    "topic": "Intercultural offers at Ostfalia Language Centre",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/intercultural-offers",
+    "file": "intercultural_offers.txt",
+    "chars": 824
   },
   {
     "key": "sprachtandem",
-    "topic": "Language tandem program — practice German with a native speaker",
+    "topic": "Language Tandem programme at Ostfalia — free language exchange with a native speaker",
     "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/language-tandem",
     "file": "sprachtandem.txt",
-    "chars": 15
+    "chars": 1851
+  },
+  {
+    "key": "certificates",
+    "topic": "Language certificates and proof of language level at Ostfalia",
+    "url": "https://www.ostfalia.de/en/university/campus-facilities/language-centre/certificates-and-language-certificates",
+    "file": "certificates.txt",
+    "chars": 1094
   },
   {
     "key": "housing",
-    "topic": "Student housing and accommodation options",
-    "url": "https://www.ostfalia.de/studieren/studieninteressierte/wohnen",
+    "topic": "Student housing and accommodation near Ostfalia",
+    "url": "https://www.ostfalia.de/en/studieren/studieninteressierte/living",
     "file": "housing.txt",
-    "chars": 6
+    "chars": 1145
   },
   {
     "key": "studierenden_service",
-    "topic": "Student service office — general admin (redirect target for out-of-scope questions)",
+    "topic": "Studierenden-Service — general student admin, redirect target for out-of-scope questions",
     "url": "https://www.ostfalia.de/hochschule/campus-einrichtungen/studierenden-service",
     "file": "studierenden_service.txt",
-    "chars": 20
+    "chars": 638
   },
   {
     "key": "partner_universities_informatik",
     "topic": "Partner universities worldwide for Informatik faculty — Erasmus and non-EU",
     "url": "manual/pdf",
     "file": "partner_universities_informatik.txt",
-    "chars": 2170
+    "chars": 1992
   },
   {
     "key": "iso_contacts_and_redirect",
     "topic": "ISO contact details and redirect rules for out-of-scope questions",
     "url": "manual/pdf",
     "file": "iso_contacts_and_redirect.txt",
-    "chars": 1125
+    "chars": 1052
   }
 ]

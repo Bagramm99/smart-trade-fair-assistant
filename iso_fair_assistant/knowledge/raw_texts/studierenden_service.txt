@@ -1,5 +1,22 @@
 SOURCE: https://www.ostfalia.de/hochschule/campus-einrichtungen/studierenden-service
-TOPIC: Student service office — general admin (redirect target for out-of-scope questions)
+TOPIC: Studierenden-Service — general student admin, redirect target for out-of-scope questions
 ============================================================
 
-Studierenden-Service
+STUDIERENDEN-SERVICE — GENERAL STUDENT ADMINISTRATION
+
+This is the correct office for questions OUTSIDE the ISO's scope.
+
+SERVICES:
+- Enrollment (Immatrikulation) and re-enrollment (Rückmeldung / semester fees)
+- Student ID cards (Ostfalia-Card)
+- Enrollment certificates and official documents
+- Study leave (Beurlaubung)
+- Leaving the university (Exmatrikulation)
+- General study advice: Zentrale Studienberatung
+
+SUB-OFFICES:
+- Immatrikulationsbüro: enrollment, student ID, certificates
+- Zentrale Studienberatung: general study advice and switching programmes
+
+CONTACT:
+ostfalia.de/hochschule/campus-einrichtungen/studierenden-service
