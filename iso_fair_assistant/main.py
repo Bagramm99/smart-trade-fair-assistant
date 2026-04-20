@@ -266,8 +266,18 @@ def main():
             visitor_text = get_visitor_input(pepper, tablet, listen_duration=7.0)
 
             if visitor_text == "__back__":
-                # Visitor tapped "← Back" — reset to default questions, no LLM call
+                # Visitor tapped "← Back" — reset questions, no LLM call
                 tablet.set_questions_for_topic("welcome")
+                continue
+
+            # Goodbye button or explicit farewell phrasing → end session directly
+            if visitor_text == "__end__" or any(
+                w in visitor_text.lower()
+                for w in ("goodbye", "bye", "that's all", "that is all",
+                          "no more", "thank you so much", "no thanks", "no thank")
+            ):
+                log.info("Session ended by visitor (%s).", visitor_text)
+                session_active = False
                 continue
 
             if not visitor_text:

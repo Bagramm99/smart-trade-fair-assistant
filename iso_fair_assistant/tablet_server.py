@@ -101,6 +101,12 @@ QUESTIONS = {
     ],
 }
 
+# Add goodbye to all question sets
+_GOODBYE = "\U0001f44b Goodbye / That\'s all, thank you!"
+for _k in list(QUESTIONS.keys()):
+    if _GOODBYE not in QUESTIONS[_k]:
+        QUESTIONS[_k].append(_GOODBYE)
+
 # Map LLM topic keys → question set keys
 TOPIC_TO_QUESTIONS = {
     "erasmus":              "erasmus",
@@ -153,11 +159,18 @@ class _TabletHandler(BaseHTTPRequestHandler):
             self._json({"questions": self.questions_holder[0]})
 
         elif path == "/touch":
-            q = params.get("q", [None])[0]
+            q        = params.get("q", [None])[0]
+            redirect = params.get("redirect", [None])[0]
             if q:
                 log.info("Tablet touch: %s", q)
                 self.touch_queue.put(q.strip())
-                self._json({"ok": True})
+                if redirect:
+                    self.send_response(302)
+                    self.send_header("Location", "/")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self._json({"ok": True})
             else:
                 self._json({"ok": False}, status=400)
 
