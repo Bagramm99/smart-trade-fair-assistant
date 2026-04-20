@@ -1,23 +1,101 @@
 # agents/pepper_agent.py
-#
-# Uses the real pypepper API methods discovered in the professor's test file.
-# Every method here maps directly to a real robot.xxx() call.
 
 import logging
+import threading
+import time
+from typing import TYPE_CHECKING
+
 from pypepper import PepperRobot
 import config
 
+if TYPE_CHECKING:
+    import numpy as np
+
 log = logging.getLogger("pepper")
+
+
+# ── Pepper mic capture (NAOqi ALAudioDevice) ──────────────────────────────────
+
+class _AudioCapture:
+    """
+    qi module that receives raw PCM frames from ALAudioDevice.
+    Registered with session.registerService() so NAOqi can call onAudioData.
+    """
+    def __init__(self):
+        self._frames = []
+        self._lock   = threading.Lock()
+
+    def onAudioData(self, numChannels, numSamples, timestamp, buffer):
+        """Called by ALAudioDevice for every audio frame (16kHz PCM int16)."""
+        try:
+            import numpy as _np
+            arr = _np.frombuffer(bytearray(buffer), dtype=_np.int16)
+            # Deinterleave: take front mic (channel 0)
+            if numChannels > 1:
+                arr = arr[::numChannels]
+            arr = arr.astype(_np.float32) / 32768.0
+            with self._lock:
+                self._frames.append(arr)
+        except Exception as e:
+            log.debug("Audio frame error: %s", e)
+
+    def get_audio(self):
+        with self._lock:
+            if not self._frames:
+                return None
+            import numpy as _np
+            return _np.concatenate(self._frames)
+
+
+def _capture_from_pepper(session, audio_service, duration: float) -> "np.ndarray | None":
+    """
+    Capture `duration` seconds of audio from Pepper's front mic.
+    Returns float32 numpy array at 16kHz, or None on failure.
+    """
+    if audio_service is None:
+        log.warning("ALAudioDevice not available — cannot capture from Pepper mic.")
+        return None
+
+    capture    = _AudioCapture()
+    service_id = None
+    try:
+        service_id = session.registerService("ISO_Mic", capture)
+        # 16000 Hz, front mic (channel 0), non-deinterleaved=0
+        audio_service.setClientPreferences("ISO_Mic", 16000, 0, 0)
+        audio_service.subscribe("ISO_Mic")
+        time.sleep(duration)
+    except Exception as e:
+        log.error("Pepper mic capture error: %s", e)
+        return None
+    finally:
+        try:
+            audio_service.unsubscribe("ISO_Mic")
+        except Exception:
+            pass
+        if service_id is not None:
+            try:
+                session.unregisterService(service_id)
+            except Exception:
+                pass
+
+    return capture.get_audio()
+
+
+# ── PepperAgent ────────────────────────────────────────────────────────────────
 
 class PepperAgent:
     """
-    Wraps PepperRobot with ISO-specific behaviour.
-    All low-level robot calls stay in this file — the orchestrator
-    only calls the high-level methods below.
+    Wraps PepperRobot with ISO stand-specific behaviour.
+    Tablet display is controlled here via the TabletServer reference.
     """
 
     def __init__(self):
         self._robot: PepperRobot | None = None
+        self._tablet_server = None   # injected after creation: agent.set_tablet_server(ts)
+
+    def set_tablet_server(self, tablet_server):
+        """Inject tablet server so Pepper can update its own display state."""
+        self._tablet_server = tablet_server
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -32,7 +110,7 @@ class PepperAgent:
                 background_movement=True,
                 speaking_movement=True,
             )
-            self._robot.set_tracking_mode("Head")  # head follows people, body stays still
+            self._robot.set_tracking_mode("Head")
             self._robot.led_reset()
             log.info("Pepper ready.")
             return True
@@ -47,24 +125,43 @@ class PepperAgent:
             self._robot.close()
             log.info("Pepper disconnected.")
 
+    # ── Tablet display ─────────────────────────────────────────────────────────
+
+    def _set_tablet_state(self, state: str):
+        """Update the interactive tablet page state."""
+        if self._tablet_server:
+            self._tablet_server.set_state(state)
+
+    def show_tablet_page(self):
+        """
+        Load the interactive tablet page on Pepper's screen.
+        Call once at startup — the page then updates itself via polling.
+        """
+        if self._robot and self._tablet_server:
+            url = self._tablet_server.tablet_page_url()
+            try:
+                self._robot.tablet.loadUrl(url)
+                self._robot.tablet.showWebview()
+                log.info("Pepper tablet loaded: %s", url)
+            except Exception as e:
+                log.warning("Could not load tablet page: %s", e)
+
     # ── Speaking ───────────────────────────────────────────────────────────────
 
     def say(self, text: str, animated: bool = False):
-        """Speak out loud. Set animated=True for expressive arm gestures."""
         log.debug("Pepper says: %s", text)
+        self._set_tablet_state("speaking")
         if self._robot:
             self._robot.say(text, language=config.PEPPER_LANGUAGE, animated=animated)
         else:
             print(f"[Pepper] {text}")
+        self._set_tablet_state("idle")
 
-    # ── Stand-level interactions ───────────────────────────────────────────────
+    # ── Interactions ───────────────────────────────────────────────────────────
 
     def attract_visitors(self):
-        """
-        Pepper proactively draws attention at the fair.
-        Waves, turns head, and delivers the stand pitch.
-        """
         self._set_leds_attract()
+        self._set_tablet_state("idle")
         self._robot.play_animation("Wave")
         self.say(
             "Hello! Welcome to the International Student Office stand. "
@@ -74,18 +171,16 @@ class PepperAgent:
         )
 
     def greet_new_visitor(self):
-        """Full greeting for a first-time visitor."""
         self._robot.play_animation("Bow")
         self._set_leds_friendly()
         self.say(
             "Hi there! I am Pepper, your guide at the International Student Office. "
             "I can answer questions about Erasmus, studying abroad, language courses, "
-            "housing, and more. What would you like to know?",
+            "housing, and more. You can also tap the screen to choose a topic!",
             animated=True,
         )
 
     def greet_returning_visitor(self):
-        """Shorter greeting for someone who already spoke to the stand today."""
         self._robot.play_animation("Yes")
         self.say(
             "Welcome back! Happy to help again. What else can I do for you?",
@@ -93,22 +188,16 @@ class PepperAgent:
         )
 
     def redirect_out_of_scope(self, topic: str):
-        """
-        Politely redirect questions the ISO cannot answer.
-        Called by the orchestrator when the LLM flags an out-of-scope question.
-        """
         self._robot.play_animation("No2")
         self.say(
-            f"That's a good question about {topic}, but that falls outside "
-            "what our office handles. For that, I'd recommend visiting the "
-            "Studierenden-Service office — they handle all general student "
-            "administration. Is there anything about international programs "
-            "I can help you with instead?"
+            f"That's a good question about {topic}, but it falls outside "
+            "what our office handles. For that, visit the "
+            "Studierenden-Service office — they handle general student admin. "
+            "Is there anything about international programmes I can help with?"
         )
 
     def announce_temi_handoff(self, flyer_topic: str):
-        """Tell the visitor that Temi is bringing a flyer."""
-        self._robot.head_yaw(20)   # glance toward Temi
+        self._robot.head_yaw(20)
         self.say(
             f"Let me ask my colleague Temi to bring you the flyer about {flyer_topic}.",
             animated=True,
@@ -116,14 +205,12 @@ class PepperAgent:
         self._robot.head_yaw(0)
 
     def temi_returned(self):
-        """Resume conversation after Temi has delivered the flyer."""
         self.say(
             "Temi has your flyer ready. Do you have any other questions?",
             animated=True,
         )
 
     def farewell(self):
-        """Close the conversation."""
         self._robot.play_animation("Bow")
         self._set_leds_goodbye()
         self.say(
@@ -133,13 +220,31 @@ class PepperAgent:
         )
         self._robot.led_reset()
 
+    # ── Microphone (via Pepper's hardware mic) ─────────────────────────────────
+
+    def listen_with_mic(self, duration: float = 7.0) -> "np.ndarray | None":
+        """
+        Capture audio from Pepper's front microphone for `duration` seconds.
+        Returns a float32 numpy array at 16kHz suitable for Whisper.
+
+        This uses NAOqi's ALAudioDevice — no laptop microphone needed.
+        The visitor speaks to Pepper naturally and the audio is processed locally.
+        """
+        if not self._robot:
+            return None
+        self._set_tablet_state("listening")
+        audio = _capture_from_pepper(
+            self._robot.session,
+            self._robot.audio,
+            duration,
+        )
+        self._set_tablet_state("thinking")
+        return audio
+
     # ── Perception ─────────────────────────────────────────────────────────────
 
     def detect_face(self) -> bool:
-        """
-        Returns True if at least one face is detected.
-        Uses the blocking wait_for_face with a short timeout.
-        """
+        """Returns True if at least one face is detected (short timeout)."""
         try:
             count = self._robot.wait_for_face(timeout=config.FACE_DETECT_TIMEOUT)
             return count > 0
@@ -147,50 +252,18 @@ class PepperAgent:
             return False
 
     def scan_qr_code(self) -> str | None:
-        """
-        Wait for the visitor to show their session QR code.
-        Returns the visitor ID string, or None on timeout.
-        """
-        self.say("If you have a visitor ID from today, please show the QR code to my camera.")
+        """Wait for QR code scan. Returns visitor ID or None."""
         try:
-            data = self._robot.wait_for_qr(timeout=config.QR_SCAN_TIMEOUT)
-            return data
+            return self._robot.wait_for_qr(timeout=config.QR_SCAN_TIMEOUT)
         except TimeoutError:
             return None
 
-    def listen_for_speech(self, keywords: list[str]) -> str | None:
-        """
-        Listen for one of a set of keywords (e.g. yes/no confirmations).
-        Returns the heard keyword or None on timeout.
-        """
+    def listen_for_keyword(self, keywords: list[str]) -> str | None:
+        """NAOqi keyword detection — use only for simple fallback confirmations."""
         try:
-            word = self._robot.wait_for_keyword(keywords, timeout=config.SPEECH_TIMEOUT)
-            return word
+            return self._robot.wait_for_keyword(keywords, timeout=config.SPEECH_TIMEOUT)
         except TimeoutError:
             return None
-
-    def wait_for_any_touch(self) -> str | None:
-        """Block until the visitor touches any sensor. Returns sensor name."""
-        try:
-            return self._robot.wait_for_touch(buttons=None, timeout=config.SESSION_IDLE_TIMEOUT)
-        except TimeoutError:
-            return None
-
-    # ── Tablet ─────────────────────────────────────────────────────────────────
-
-    def show_tablet_text(self, text: str):
-        """Display text on Pepper's chest tablet."""
-        if self._robot:
-            self._robot.show_text(text)
-
-    def show_tablet_image(self, url_or_path: str):
-        """Display an image on Pepper's chest tablet."""
-        if self._robot:
-            self._robot.show_image(url_or_path)
-
-    def clear_tablet(self):
-        if self._robot:
-            self._robot.clear_tablet()
 
     # ── Status ─────────────────────────────────────────────────────────────────
 
@@ -203,28 +276,24 @@ class PepperAgent:
         version = self._robot.get_system_version()
         print(f"[Pepper] {name} | NAOqi {version} | Battery {battery}%")
 
-    # ── Internal LED helpers ───────────────────────────────────────────────────
+    # ── LED helpers ────────────────────────────────────────────────────────────
 
     def _set_leds_attract(self):
-        """Cyan pulsing eyes to attract attention from a distance."""
         self._robot.led_fade("FaceLeds", "cyan", 1.0)
 
     def _set_leds_friendly(self):
-        """White eyes during normal conversation."""
         self._robot.led_reset()
 
     def _set_leds_thinking(self):
-        """Blue eyes while the LLM is generating a response."""
         self._robot.led_fade("FaceLeds", "blue", 0.5)
 
     def _set_leds_goodbye(self):
-        """Green eyes during farewell."""
         self._robot.led_fade("FaceLeds", "green", 1.0)
 
     def set_thinking_leds(self):
-        """Called by orchestrator while waiting for LLM response."""
         self._set_leds_thinking()
+        self._set_tablet_state("thinking")
 
     def set_speaking_leds(self):
-        """Called by orchestrator when Pepper starts speaking."""
         self._set_leds_friendly()
+        self._set_tablet_state("speaking")

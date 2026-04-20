@@ -1,11 +1,12 @@
 # orchestrator.py — LLM orchestrator
 #
-# Takes raw visitor speech → decides what Pepper says + what Temi shows.
-# Keeps the last N conversation turns so the LLM has context continuity.
+# After each response, updates Pepper's tablet with topic-relevant
+# follow-up questions so the visitor can continue by touch.
 
 import json
 import logging
 import os
+from typing import Callable
 
 from openai import OpenAI
 
@@ -57,36 +58,37 @@ Always respond in JSON with this exact schema:
 }
 """.strip()
 
-HISTORY_LIMIT = 6   # number of conversation turns to keep (user + assistant pairs)
+HISTORY_LIMIT = 6
 
 
 class Orchestrator:
-    def __init__(self, pepper: PepperAgent, temi: TemiAgent,
-                 kb: KnowledgeBase, sessions: SessionManager):
+    def __init__(
+        self,
+        pepper: PepperAgent,
+        temi: TemiAgent,
+        kb: KnowledgeBase,
+        sessions: SessionManager,
+        tablet_server=None,
+    ):
         self._pepper   = pepper
         self._temi     = temi
         self._kb       = kb
         self._sessions = sessions
+        self._tablet   = tablet_server
         self._history: list[dict] = []
         self._current_visitor: str | None = None
-        self._listen_fn = None   # injected from main.py after Whisper loads
+        self._listen_fn: Callable | None  = None
 
         api_key = config.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", "")
         self._llm = OpenAI(api_key=api_key)
 
-    def set_listen_fn(self, fn):
-        """
-        Inject the Whisper listen function so the orchestrator can use it
-        for yes/no detection in _offer_flyer without importing main.py.
-        Called from main.py after Whisper initialises:
-            orchestrator.set_listen_fn(listen_whisper)
-        """
+    def set_listen_fn(self, fn: Callable):
+        """Inject the yes/no listen function from main.py."""
         self._listen_fn = fn
 
-    # ── Public interface ───────────────────────────────────────────────────────
+    # ── Public ────────────────────────────────────────────────────────────────
 
     def start_interaction(self, visitor_id: str):
-        """Called when a new visitor is detected."""
         self._current_visitor = visitor_id
         self._history = []
         self._sessions.start_session(visitor_id)
@@ -97,121 +99,93 @@ class Orchestrator:
             self._pepper.greet_new_visitor()
 
         self._temi.show_welcome()
+        if self._tablet:
+            self._tablet.set_questions_for_topic("welcome")
 
     def handle_input(self, visitor_text: str) -> bool:
-        """
-        Process one visitor utterance.
-        Returns True to continue the session, False to end it.
-        """
         log.info("Visitor said: %s", visitor_text)
 
-        # 1. Retrieve relevant knowledge
-        context = self._kb.search(visitor_text)
-
-        # 2. Build messages for LLM
+        context  = self._kb.search(visitor_text)
         messages = self._build_messages(visitor_text, context)
 
-        # 3. Show thinking LEDs while waiting for LLM
         self._pepper.set_thinking_leds()
 
-        # 4. Call LLM
         decision = self._call_llm(messages)
         if decision is None:
             self._pepper.say("I'm sorry, I had a technical issue. Please ask again.")
             return True
 
-        # 5. Update conversation history
-        self._history.append({"role": "user", "content": visitor_text})
-        self._history.append({"role": "assistant", "content": json.dumps(decision)})
+        self._history.append({"role": "user",      "content": visitor_text})
+        self._history.append({"role": "assistant",  "content": json.dumps(decision)})
         if len(self._history) > HISTORY_LIMIT * 2:
             self._history = self._history[-(HISTORY_LIMIT * 2):]
 
-        # 6. Dispatch
         return self._dispatch(decision)
 
     def end_interaction(self):
-        """Called when session ends (farewell or timeout)."""
         if self._current_visitor:
             self._sessions.close_session(self._current_visitor)
             self._current_visitor = None
         self._history = []
         self._pepper.farewell()
         self._temi.show_farewell()
+        if self._tablet:
+            self._tablet.reset_to_default()
 
     # ── LLM ───────────────────────────────────────────────────────────────────
 
     def _build_messages(self, visitor_text: str, context: str) -> list[dict]:
         system = SYSTEM_PROMPT + f"\n\nRELEVANT CONTEXT:\n{context}"
-        messages = [{"role": "system", "content": system}]
-        messages.extend(self._history)
-        messages.append({"role": "user", "content": visitor_text})
-        return messages
+        return [{"role": "system", "content": system}, *self._history,
+                {"role": "user", "content": visitor_text}]
 
     def _call_llm(self, messages: list[dict]) -> dict | None:
         try:
-            response = self._llm.chat.completions.create(
+            resp  = self._llm.chat.completions.create(
                 model=config.LLM_MODEL,
                 messages=messages,
                 temperature=config.LLM_TEMPERATURE,
                 response_format={"type": "json_object"},
             )
-            raw      = response.choices[0].message.content
+            raw      = resp.choices[0].message.content
             decision = json.loads(raw)
-            log.debug("LLM decision: %s", decision)
+            log.debug("LLM: %s", decision)
             return decision
-        except json.JSONDecodeError as e:
-            log.error("JSON parse error: %s", e)
         except Exception as e:
             log.error("LLM call failed: %s", e)
-        return None
+            return None
 
     # ── Dispatch ───────────────────────────────────────────────────────────────
 
     def _dispatch(self, decision: dict) -> bool:
-        """
-        Execute the LLM decision.
-        Returns True to continue the session, False to end it.
-        """
         topic       = decision.get("topic", "other")
         speech      = decision.get("speech", "")
         offer_flyer = decision.get("offer_flyer", False)
         flyer_topic = decision.get("flyer_topic")
         session_end = decision.get("session_end", False)
 
-        # Track topic in session
         if self._current_visitor and topic not in ("other", "welcome", "farewell"):
             self._sessions.record_topic(self._current_visitor, topic)
 
-        # Update Temi screen to match the topic Pepper is discussing
+        # Update Temi screen + tablet questions based on topic
         self._temi.show_topic_image(topic)
+        if self._tablet:
+            self._tablet.set_questions_for_topic(topic)
 
-        # Pepper speaks
         self._pepper.set_speaking_leds()
         self._pepper.say(speech, animated=True)
 
-        # Offer a flyer if the LLM decided one would help
         if offer_flyer and flyer_topic:
             self._offer_flyer(flyer_topic)
 
-        # Session end?
         if session_end:
             return False
-
         return True
 
     def _offer_flyer(self, flyer_topic: str):
-        """
-        Ask visitor's permission, then trigger Temi if they say yes.
-
-        Uses Whisper for yes/no detection instead of Pepper's NAOqi ASR —
-        NAOqi keyword recognition is unreliable in noisy fair environments
-        (consistently mishears "yes" as "no" etc). Whisper is much more accurate.
-        The listen function is injected at runtime from main.py via set_listen_fn().
-        """
         topic_label = flyer_topic.replace("_", " ")
 
         if config.AUTO_ACCEPT_FLYER:
-            log.info("AUTO_ACCEPT_FLYER enabled — skipping voice confirmation.")
             self._temi.deliver_flyer(flyer_topic)
             self._pepper.temi_returned()
             return
@@ -219,44 +193,36 @@ class Orchestrator:
         self._pepper.announce_temi_handoff(topic_label)
         self._pepper.say(
             "Would you like me to ask Temi to bring it now? "
-            "Please say yes or no.",
+            "Say yes, or tap any question on the screen.",
             animated=True,
         )
 
-        # Use Whisper for yes/no — much more accurate than Pepper's built-in ASR
+        # Listen via Whisper + tablet simultaneously (injected from main.py)
         answer = None
         if self._listen_fn is not None:
-            transcript = self._listen_fn(duration=5.0)   # short recording for yes/no
-            if transcript:
-                t = transcript.lower()
-                if any(w in t for w in ("yes", "yeah", "yep", "sure", "okay", "please", "go ahead")):
-                    answer = "yes"
-                elif any(w in t for w in ("no", "nope", "don't", "not", "skip")):
-                    answer = "no"
-                else:
-                    log.info("Whisper transcript did not match yes/no: '%s'", transcript)
+            answer = self._listen_fn(self._pepper, self._tablet)
 
-        # Fallback to keyboard if Whisper not available or nothing heard
         if answer is None and config.ENABLE_TYPED_FALLBACK:
             try:
-                typed = input("  [Pepper did not catch yes/no. TYPE yes or no]: ").strip().lower()
-                if typed in ("yes", "y", "yeah", "sure"):
+                typed = input("  [yes/no]: ").strip().lower()
+                if typed in ("y", "yes", "yeah", "sure"):
                     answer = "yes"
-                elif typed in ("no", "n", "nope"):
+                elif typed in ("n", "no", "nope"):
                     answer = "no"
             except (EOFError, KeyboardInterrupt):
-                answer = None
+                pass
 
         log.info("Flyer confirmation: %s", answer)
+
         if answer == "yes":
             self._temi.deliver_flyer(flyer_topic)
             self._pepper.temi_returned()
         elif answer is None:
             self._pepper.say(
-                "I did not catch your answer, so I will not send Temi yet. "
-                f"You can also take the {topic_label} flyer from the table next to Temi."
+                "I did not catch your answer. "
+                f"You can take the {topic_label} flyer from the table next to Temi."
             )
         else:
             self._pepper.say(
-                f"No problem! You can find the {topic_label} flyers on the table next to Temi."
+                f"No problem! The {topic_label} flyers are on the table next to Temi."
             )
