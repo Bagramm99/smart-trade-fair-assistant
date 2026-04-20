@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Ostfalia ISO</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body {
+  font-family: Arial, sans-serif;
+  background: #00264d;
+  color: #fff;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+header {
+  background: #003d7a;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 3px solid #009ee0;
+  flex-shrink: 0;
+}
+.logo-text .uni  { font-size: 18px; font-weight: bold; letter-spacing: 1px; }
+.logo-text .dept { font-size: 12px; color: #aad4f5; margin-top: 2px; }
+.stripes { display:flex; gap:3px; }
+.stripes span { display:block; width:10px; height:32px; border-radius:2px; }
+#state-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 20px; font-size: 13px; font-weight: bold;
+  transition: background 0.4s, color 0.4s; flex-shrink: 0;
+}
+#state-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+body.idle      #state-bar { background:#00264d; color:#7ec8f0; }
+body.idle      #state-dot { background:#009ee0; }
+body.speaking  #state-bar { background:#1a3a00; color:#a8e063; }
+body.speaking  #state-dot { background:#6fcf2a; animation:blink 0.8s infinite; }
+body.listening #state-bar { background:#002244; color:#f7a800; }
+body.listening #state-dot { background:#f7a800; animation:pulse 1s ease-in-out infinite; }
+body.thinking  #state-bar { background:#1a0033; color:#cc99ff; }
+body.thinking  #state-dot { background:#9955ff; animation:spin 1.2s linear infinite; }
+@keyframes blink  { 0%,100%{opacity:1} 50%{opacity:0.3} }
+@keyframes pulse  { 0%,100%{transform:scale(1)} 50%{transform:scale(1.6)} }
+@keyframes spin   { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+#prompt {
+  text-align: center; padding: 8px 20px 2px;
+  font-size: 14px; color: #aad4f5; flex-shrink: 0;
+}
+#questions {
+  flex: 1; display: grid; grid-template-columns: 1fr 1fr;
+  gap: 10px; padding: 10px 16px 12px; overflow: hidden;
+}
+.q-btn {
+  background: rgba(0,158,224,0.12);
+  border: 1.5px solid rgba(0,158,224,0.35);
+  border-radius: 12px; color: #e8f4ff;
+  font-size: 14px; line-height: 1.35;
+  padding: 14px 12px;
+  display: flex; align-items: center; justify-content: center;
+  text-align: center; cursor: pointer;
+  transition: background 0.15s, transform 0.1s, border-color 0.15s;
+}
+.q-btn:active, .q-btn.pressed {
+  background: rgba(0,158,224,0.45);
+  border-color: #009ee0;
+  transform: scale(0.96);
+}
+.q-btn.back {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.2);
+  color: #7799bb; font-size: 12px;
+  grid-column: 1 / -1; max-height: 44px;
+}
+body.speaking .q-btn, body.thinking .q-btn {
+  opacity: 0.4; pointer-events: none;
+}
+footer {
+  text-align: center; padding: 5px 16px 8px;
+  font-size: 11px; color: #4a6a88; flex-shrink: 0;
+}
+</style>
+</head>
+<body class="idle">
+
+<header>
+  <div class="logo-text">
+    <div class="uni">OSTFALIA</div>
+    <div class="dept">International Student Office</div>
+  </div>
+  <div class="stripes">
+    <span style="background:#009ee0"></span>
+    <span style="background:#00b894"></span>
+    <span style="background:#f7a800"></span>
+    <span style="background:#e84393"></span>
+  </div>
+</header>
+
+<div id="state-bar">
+  <div id="state-dot"></div>
+  <span id="state-text">Welcome! Tap a question to get started.</span>
+</div>
+
+<div id="prompt">What would you like to know?</div>
+<div id="questions"></div>
+
+<footer>incoming-iso@ostfalia.de &nbsp;·&nbsp; Am Exer 2, Raum 008</footer>
+
+<script>
+const STATE_LABELS = {
+  idle:      "Welcome! Tap a question to get started.",
+  speaking:  "Pepper is speaking — please wait ...",
+  listening: "Listening — or tap a question below",
+  thinking:  "Thinking ...",
+};
+const PROMPTS = {
+  idle: "What would you like to know?",
+  listening: "Or choose a question:",
+  speaking: "", thinking: "",
+};
+
+let currentState = "idle", currentQuestions = [];
+
+function applyState(state) {
+  if (state === currentState) return;
+  currentState = state;
+  document.body.className = state;
+  document.getElementById("state-text").textContent = STATE_LABELS[state] || "";
+  document.getElementById("prompt").textContent = PROMPTS[state] || "";
+}
+
+function renderQuestions(questions) {
+  const c = document.getElementById("questions");
+  c.innerHTML = "";
+  questions.forEach(q => {
+    const btn = document.createElement("button");
+    btn.className = "q-btn" + (q.startsWith("\u2190") ? " back" : "");
+    btn.textContent = q;
+    btn.addEventListener("click", () => {
+      btn.classList.add("pressed");
+      setTimeout(() => btn.classList.remove("pressed"), 300);
+      fetch("/touch?q=" + encodeURIComponent(q.startsWith("\u2190") ? "__back__" : q))
+        .catch(() => {});
+    });
+    c.appendChild(btn);
+  });
+}
+
+async function poll() {
+  try {
+    const [sr, qr] = await Promise.all([fetch("/api/state"), fetch("/api/questions")]);
+    const { state }     = await sr.json();
+    const { questions } = await qr.json();
+    applyState(state);
+    if (JSON.stringify(questions) !== JSON.stringify(currentQuestions)) {
+      currentQuestions = questions;
+      renderQuestions(questions);
+    }
+  } catch(e) {}
+}
+
+// Initial render
+renderQuestions([
+  "What is the International Student Office?",
+  "How do I apply for Erasmus?",
+  "What language courses are available?",
+  "How do I find housing?",
+  "What health insurance do I need?",
+  "How do I study abroad?",
+]);
+
+setInterval(poll, 400);
+poll();
+</script>
+</body>
+</html>

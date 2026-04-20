@@ -1,0 +1,27 @@
+SOURCE: manual/pdf
+TOPIC: ISO contact details and redirect rules for out-of-scope questions
+============================================================
+
+ISO CONTACT INFORMATION:
+Email (incoming students): incoming-iso@ostfalia.de
+In-person: Véronique Bizien, Am Exer 2, Raum 008
+ISO outgoing / scholarships: a-s.garau@ostfalia.de
+
+WHAT THE ISO HANDLES:
+- Incoming exchange students (application and enrollment)
+- Erasmus+ outgoing applications and partner university selection
+- DAAD PROMOS scholarships for non-EU exchange
+- Learning Agreements and credit recognition coordination
+- Integration support (FYI program)
+- Language tandem and intercultural offerings (with Sprachenzentrum)
+
+WHAT THE ISO DOES NOT HANDLE — redirect to:
+- General enrollment / first semester admin → Studierenden-Service or Immatrikulationsbüro
+- Semester fees and re-enrollment → Studierenden-Service
+- Exam registration and grading → Prüfungsamt of the relevant faculty
+- Library access → Bibliothek
+- IT accounts and student portal → Rechenzentrum
+- General course questions → faculty office of the student's programme
+
+REDIRECT CONTACT:
+Studierenden-Service: ostfalia.de/hochschule/campus-einrichtungen/studierenden-service
