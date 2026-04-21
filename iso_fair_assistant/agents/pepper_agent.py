@@ -4,8 +4,10 @@
 # Every method here maps directly to a real robot.xxx() call.
 
 import logging
+import threading
 from pypepper import PepperRobot
 import config
+from tablet_server import questions_for_topic
 
 log = logging.getLogger("pepper")
 
@@ -80,8 +82,10 @@ class PepperAgent:
         self.say(
             "Hi there! I am Pepper, your guide at the International Student Office. "
             "I can answer questions about Erasmus, studying abroad, language courses, "
-            "housing, and more. What would you like to know?",
+            "housing, and more. You can also look at Temi's screen for more topic ideas and details. "
+            "What would you like to know?",
             animated=True,
+
         )
 
     def greet_returning_visitor(self):
@@ -176,6 +180,68 @@ class PepperAgent:
         except TimeoutError:
             return None
 
+    def get_tablet_input(self, timeout: float = None) -> str | None:
+        """Return the next button press from Pepper's tablet page."""
+        if not self._robot:
+            return None
+        try:
+            return self._robot.get_tablet_touch(timeout=timeout)
+        except Exception as e:
+            log.debug("Tablet input error: %s", e)
+            return None
+
+    def set_tablet_state(self, state: str) -> bool:
+        if self._robot:
+            return self._robot.set_tablet_state(state)
+        return False
+
+    def set_tablet_questions(self, questions: list[str]) -> bool:
+        if self._robot:
+            return self._robot.set_tablet_questions(questions)
+        return False
+
+    def set_tablet_questions_for_topic(self, topic: str) -> bool:
+        if self._robot:
+            return self._robot.set_tablet_questions(questions_for_topic(topic))
+        return False
+
+    def wait_for_start_touch(self, timeout: float = 8.0) -> bool:
+        """
+        Wait for either the Pepper tablet start button or any body touch sensor.
+
+        Returns True if a start signal was detected before timeout, otherwise False.
+        """
+        if not self._robot:
+            return False
+
+        touched = threading.Event()
+
+        def _wait_tablet_touch():
+            try:
+                if self._robot.wait_for_tablet_touch(timeout=timeout):
+                    touched.set()
+            except TimeoutError:
+                pass
+            except Exception as e:
+                log.debug("Tablet touch wait error: %s", e)
+
+        def _wait_body_touch():
+            try:
+                sensor = self._robot.wait_for_touch(buttons=None, timeout=timeout)
+                if sensor:
+                    touched.set()
+            except TimeoutError:
+                pass
+            except Exception as e:
+                log.debug("Body touch wait error: %s", e)
+
+        tablet_touch_thread = threading.Thread(target=_wait_tablet_touch, daemon=True)
+        body_touch_thread = threading.Thread(target=_wait_body_touch, daemon=True)
+        tablet_touch_thread.start()
+        body_touch_thread.start()
+
+        return touched.wait(timeout=timeout)
+
     # ── Tablet ─────────────────────────────────────────────────────────────────
 
     def show_tablet_text(self, text: str):
@@ -231,17 +297,26 @@ class PepperAgent:
 
     # ── Tablet splash ──────────────────────────────────────────────────────────
 
-    def show_splash(self):
+    def show_splash(self, wait_for_tap: bool = False, timeout: float = 8.0) -> bool:
         """
         Show a welcome / tap-to-start message on Pepper's chest tablet.
         Uses pypepper's built-in TabletServer (started automatically because
         local_ip is passed to PepperRobot in connect()).
         Font size is 60px — readable at stand distance.
+
+        If wait_for_tap is True, this blocks briefly and returns whether a tap
+        (tablet or body touch) was detected.
         """
-        if self._robot:
-            self._robot.show_text(
-                "Welcome to the\nInternational Student Office!\n\nPlease tap my screen\nor press Enter to start."
-            )
+        if not self._robot:
+            return False
+
+        self._robot.show_tablet_home()
+        self._robot.set_tablet_questions(questions_for_topic("welcome"))
+        self._robot.set_tablet_state("splash")
+
+        if not wait_for_tap:
+            return True
+        return self.wait_for_start_touch(timeout=timeout)
 
     # ── Tracking mode helpers ──────────────────────────────────────────────────
 

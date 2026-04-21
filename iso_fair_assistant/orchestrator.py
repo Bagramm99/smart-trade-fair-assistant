@@ -6,6 +6,8 @@
 import json
 import logging
 import os
+import threading
+import time
 
 from openai import OpenAI
 
@@ -90,6 +92,8 @@ class Orchestrator:
         self._current_visitor = visitor_id
         self._history = []
         self._sessions.start_session(visitor_id)
+        self._pepper.set_tablet_state("session")
+        self._pepper.set_tablet_questions_for_topic("welcome")
 
         if self._sessions.is_already_helped(visitor_id):
             self._pepper.greet_returning_visitor()
@@ -113,11 +117,13 @@ class Orchestrator:
 
         # 3. Show thinking LEDs while waiting for LLM
         self._pepper.set_thinking_leds()
+        self._pepper.set_tablet_state("thinking")
 
         # 4. Call LLM
         decision = self._call_llm(messages)
         if decision is None:
             self._pepper.say("I'm sorry, I had a technical issue. Please ask again.")
+            self._pepper.set_tablet_state("listening")
             return True
 
         # 5. Update conversation history
@@ -137,6 +143,8 @@ class Orchestrator:
         self._history = []
         self._pepper.farewell()
         self._temi.show_farewell()
+        self._pepper.clear_tablet()
+        self._temi.clear_screen()
 
     # ── LLM ───────────────────────────────────────────────────────────────────
 
@@ -177,6 +185,20 @@ class Orchestrator:
         offer_flyer = decision.get("offer_flyer", False)
         flyer_topic = decision.get("flyer_topic")
         session_end = decision.get("session_end", False)
+        flyer_topics = {
+            "erasmus",
+            "partner_universities",
+            "studying_abroad",
+            "outgoing_process",
+            "europe_partners",
+            "non_eu_partners",
+            "language_courses",
+            "housing",
+            "health_insurance",
+        }
+
+        if topic:
+            self._pepper.set_tablet_questions_for_topic(topic)
 
         # Track topic in session
         if self._current_visitor and topic not in ("other", "welcome", "farewell"):
@@ -188,9 +210,11 @@ class Orchestrator:
         # Pepper speaks
         self._pepper.set_speaking_leds()
         self._pepper.say(speech, animated=True)
+        self._pepper.set_tablet_state("listening")
 
         # Offer a flyer if the LLM decided one would help
-        if offer_flyer and flyer_topic:
+        if (offer_flyer or topic in flyer_topics) and (flyer_topic or topic):
+            flyer_topic = flyer_topic or topic
             self._offer_flyer(flyer_topic)
 
         # Session end?
@@ -217,8 +241,7 @@ class Orchestrator:
 
         if config.AUTO_ACCEPT_FLYER:
             log.info("AUTO_ACCEPT_FLYER — skipping confirmation.")
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
+            self._deliver_and_wait(flyer_topic)
             return
 
         self._pepper.announce_temi_handoff(topic_label)
@@ -227,12 +250,18 @@ class Orchestrator:
             animated=True,
         )
 
-        # Use Pepper's keyword detection (NAOqi) for yes/no
-        answer = self._pepper.listen_for_speech(
-            ["yes", "yeah", "yep", "sure", "okay", "no", "nope"]
-        )
+        # Offer the same confirmation directly on the tablet for faster flow.
+        self._pepper.set_tablet_questions([
+            "Yes, bring the flyer",
+            "No, thanks",
+        ])
+
+        answer = self._wait_for_flyer_confirmation()
 
         log.info("Flyer confirmation heard: %s", answer)
+
+        # Restore topic shortcuts after this temporary yes/no prompt.
+        self._pepper.set_tablet_questions_for_topic(flyer_topic)
 
         if answer is None:
             # Nothing heard — auto-send Temi rather than blocking
@@ -241,12 +270,65 @@ class Orchestrator:
                 f"I'll go ahead and ask Temi to bring the {topic_label} flyer.",
                 animated=True,
             )
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
+            self._deliver_and_wait(flyer_topic)
         elif answer.lower() in ("yes", "yeah", "yep", "sure", "okay"):
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
+            self._deliver_and_wait(flyer_topic)
         else:
             self._pepper.say(
                 f"No problem! The {topic_label} flyers are on the table next to Temi."
             )
+
+    def _deliver_and_wait(self, flyer_topic: str):
+        """Start Temi delivery, show waiting state, then continue when Temi is ready or timed out."""
+        self._pepper.set_tablet_state("waiting")
+        self._temi.deliver_flyer(flyer_topic)
+
+        if self._temi.wait_for_delivery_ready(timeout=config.TEMI_FLYER_PROMPT_TIMEOUT):
+            self._pepper.temi_returned()
+            self._pepper.set_tablet_state("listening")
+            return
+
+        deadline = time.time() + config.TEMI_FLYER_WAIT_TIMEOUT
+        while time.time() < deadline:
+            if self._temi.wait_for_delivery(timeout=1.0):
+                self._pepper.temi_returned()
+                self._pepper.set_tablet_state("listening")
+                return
+
+        log.info("Temi delivery timed out after %ss; continuing anyway.", config.TEMI_FLYER_WAIT_TIMEOUT)
+        self._pepper.say(
+            "Temi is taking a little longer, so please feel free to continue looking at the screen.",
+            animated=False,
+        )
+        self._pepper.set_tablet_state("listening")
+
+    def _wait_for_flyer_confirmation(self, timeout: int = 12) -> str | None:
+        """Wait for either voice (yes/no) or tablet yes/no button input."""
+        answer = [None]
+        done = threading.Event()
+
+        def _voice():
+            heard = self._pepper.listen_for_speech(
+                ["yes", "yeah", "yep", "sure", "okay", "no", "nope"]
+            )
+            if heard and not done.is_set():
+                answer[0] = heard.lower().strip()
+                done.set()
+
+        def _tablet():
+            choice = self._pepper.get_tablet_input(timeout=timeout)
+            if not choice or done.is_set():
+                return
+            normalized = choice.lower().strip()
+            if "yes" in normalized:
+                answer[0] = "yes"
+                done.set()
+            elif "no" in normalized:
+                answer[0] = "no"
+                done.set()
+
+        threading.Thread(target=_voice, daemon=True).start()
+        threading.Thread(target=_tablet, daemon=True).start()
+
+        done.wait(timeout=timeout + 1)
+        return answer[0]

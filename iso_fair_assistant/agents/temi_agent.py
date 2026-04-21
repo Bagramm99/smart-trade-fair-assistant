@@ -201,7 +201,7 @@ DELIVERY_DEFAULT = (
 
 # ── Navigation constants ──────────────────────────────────────────────────────
 
-LOCATION_VISITOR = "entrance"   # saved position ~2 meters toward visitor
+LOCATION_VISITOR = config.TEMI_START_LOCATION   # saved position near the visitor
 LOCATION_HOME    = "home base"  # Temi's starting position at the stand
 TRAVEL_WAIT_SEC  = 5            # seconds to wait for Temi to arrive
 FLYER_WAIT_SEC   = 30           # seconds Temi waits at visitor position
@@ -217,6 +217,9 @@ class TemiAgent:
     def __init__(self):
         self._robot = None
         self._asset_server_proc: subprocess.Popen | None = None
+        self._delivery_thread: threading.Thread | None = None
+        self._delivery_ready_event = threading.Event()
+        self._delivery_done_event = threading.Event()
 
     def _ensure_tablet_server(self):
         """Start local static server for Temi images if enabled and not running."""
@@ -281,10 +284,36 @@ class TemiAgent:
                 log.error("Temi REST not ready at %s (no locations response).", TEMI_BASE_URL)
                 return False
             log.info("Temi ready. Locations available: %s", locations)
+            log.info("Temi flyer start location: %s", LOCATION_VISITOR)
             return True
         except Exception as e:
             log.error("Temi connection failed: %s", e)
             return False
+
+    def get_locations(self) -> list[str]:
+        """Return the saved Temi locations currently available on the robot."""
+        locations = _temi_locations()
+        return locations or []
+
+    def preview_locations(self, pause_seconds: float = 2.0) -> list[str]:
+        """
+        Cycle through all saved locations so you can see the terminal log and
+        decide which one to use as the start/end point.
+
+        Returns the list of locations that were previewed.
+        """
+        locations = self.get_locations()
+        if not locations:
+            log.info("No Temi locations available to preview.")
+            return []
+
+        for location in locations:
+            log.info("Previewing Temi location: %s", location)
+            _temi_goto(location)
+            time.sleep(pause_seconds)
+
+        log.info("Finished previewing %d Temi locations.", len(locations))
+        return locations
 
     def disconnect(self):
         if self._robot:
@@ -319,6 +348,8 @@ class TemiAgent:
         speech    = DELIVERY_SCRIPTS.get(topic, DELIVERY_DEFAULT)
 
         log.info("Temi starting flyer delivery for topic '%s'", topic)
+        self._delivery_ready_event.clear()
+        self._delivery_done_event.clear()
 
         # Show image immediately
         if not _temi_show_image(image_url):
@@ -331,7 +362,20 @@ class TemiAgent:
             daemon=True,
         )
         thread.start()
+        self._delivery_thread = thread
         return True
+
+    def wait_for_delivery(self, timeout: float | None = None) -> bool:
+        """Wait until the current flyer delivery thread finishes."""
+        thread = self._delivery_thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def wait_for_delivery_ready(self, timeout: float | None = None) -> bool:
+        """Wait until Temi has arrived, spoken, and shown the flyer."""
+        return self._delivery_ready_event.wait(timeout=timeout)
 
     def _delivery_sequence(self, speech: str, image_url: str):
         """Background: goto entrance → wait → speak → wait 30s → goto home base."""
@@ -346,6 +390,9 @@ class TemiAgent:
         if not _temi_show_image(image_url):
             _temi_say("My screen is currently unavailable.")
 
+        self._delivery_ready_event.set()
+        log.info("Temi flyer handoff is ready for Pepper.")
+
         log.info("Temi → waiting %ds for visitor to take flyer ...", FLYER_WAIT_SEC)
         time.sleep(FLYER_WAIT_SEC)
 
@@ -353,6 +400,7 @@ class TemiAgent:
         log.info("Temi → returning to '%s'", LOCATION_HOME)
         _temi_goto(LOCATION_HOME)
         log.info("Temi → back at home base.")
+        self._delivery_done_event.set()
 
     def show_topic_image(self, topic: str):
         """Display topic image while Pepper speaks — no navigation."""
@@ -368,6 +416,18 @@ class TemiAgent:
 
     def show_farewell(self):
         self.show_topic_image("farewell")
+
+    def clear_screen(self):
+        """Clear Temi's screen after a session ends."""
+        if self._robot is None:
+            return
+        try:
+            if hasattr(self._robot, "clear_tablet"):
+                self._robot.clear_tablet()
+            elif hasattr(self._robot, "clear_screen"):
+                self._robot.clear_screen()
+        except Exception as e:
+            log.debug("Temi clear screen failed: %s", e)
 
     def listen(self, timeout: int = 15) -> str | None:
         """

@@ -120,7 +120,7 @@ class TemiRobot:
     def say(
         self,
         text: str,
-        language: str = "german",
+        language: str = "english",
         animation: bool = False
     ) -> None:
         """

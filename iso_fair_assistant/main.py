@@ -4,13 +4,12 @@
 # Stop with:  Ctrl+C  (clean shutdown)
 #
 # Flow:
-#   1. Attract loop: Pepper waves + pitch, shows splash, waits for touch OR Enter
+#   1. Attract loop: Pepper waves + pitch, shows splash, repeats until touch
 #   2. Visitor arrives: Pepper switches to WholeBody tracking, greets
 #   3. Conversation loop:
-#        - Temi listens (Android ASR, /listen endpoint) in a thread
-#        - Terminal input runs in parallel as fallback
+#        - Pepper tablet buttons run in parallel with terminal input
 #        - First input wins
-#        - If nothing heard: Pepper apologises and asks to type or tap
+#        - If nothing is entered: Pepper apologises and asks to tap or type
 #   4. Session ends → back to step 1
 
 import logging
@@ -35,69 +34,73 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-# ── Parallel input helpers ─────────────────────────────────────────────────────
-
-def _wait_for_start(pepper: PepperAgent) -> None:
+def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
     """
-    Block until a visitor starts the session via either:
-      - Touching Pepper's tablet or any sensor  (pepper.wait_for_any_touch)
-      - Pressing Enter on the terminal           (input())
+    Wait for a start signal from any of these sources:
+      - Pepper tablet start button / body touch
+      - Face detection (useful when the tap is unreliable)
+      - Enter in the terminal
 
-    Both run in parallel threads — whichever fires first wins.
+    Returns a short reason string, or None on timeout.
     """
+    result = [None]
     done = threading.Event()
 
-    def _touch():
+    def _tablet_or_touch():
         try:
-            pepper.wait_for_any_touch()   # blocks until touched
+            if pepper.wait_for_start_touch(timeout=timeout):
+                result[0] = "tablet_or_touch"
+                done.set()
         except Exception as e:
-            log.debug("Touch wait error: %s", e)
-        done.set()
+            log.debug("Start touch wait error: %s", e)
+
+    def _face():
+        try:
+            if pepper.detect_face():
+                result[0] = "face_detected"
+                done.set()
+        except Exception as e:
+            log.debug("Face wait error: %s", e)
 
     def _terminal():
         try:
-            input("  [Press Enter when visitor is ready, or visitor taps the screen]: ")
+            input("  [Press Enter to start, tap Pepper's button, or let Pepper detect your face]: ")
+            if not done.is_set():
+                result[0] = "terminal"
+                done.set()
         except (EOFError, KeyboardInterrupt):
             pass
-        done.set()
 
-    threading.Thread(target=_touch,    daemon=True).start()
+    threading.Thread(target=_tablet_or_touch, daemon=True).start()
+    threading.Thread(target=_face, daemon=True).start()
     threading.Thread(target=_terminal, daemon=True).start()
-    done.wait()   # wait forever until one of them fires
+
+    done.wait(timeout=timeout + 5)
+    return result[0]
 
 
-def get_input(temi: TemiAgent, timeout: int = 15) -> str | None:
+def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
     """
-    Get free-form visitor input from two parallel sources:
-      A) Temi's microphone via temi.listen()  — Android ASR, full transcript
-      B) Terminal keyboard input              — always available as fallback
+    Get visitor input from Pepper's tablet buttons and terminal keyboard.
 
     Returns the first non-empty result, or None if both time out.
-
-    Why Temi's mic instead of Pepper's:
-      - Temi is positioned on the table closer to the visitor
-      - Android ASR returns a full free-form transcript (no vocabulary limit)
-      - Pepper's NAOqi ASR only supports fixed keyword lists
     """
     result = [None]
     done   = threading.Event()
 
-    def _temi_listen():
+    def _tablet_listen():
         try:
-            text = temi.listen(timeout=timeout)
+            text = pepper.get_tablet_input(timeout=timeout)
             if text and not done.is_set():
                 result[0] = text
                 done.set()
         except Exception as e:
-            log.warning("Temi listen thread error: %s", e)
-        finally:
-            # Always signal done so the terminal thread doesn't wait forever
-            done.set()
+            log.debug("Pepper tablet input error: %s", e)
 
     def _terminal_listen():
         try:
             if config.ENABLE_TYPED_FALLBACK:
-                text = input("  [TYPE your question, or speak to Temi]: ").strip()
+                text = input("  [TYPE your question, or tap a Pepper button]: ").strip()
                 if text and not done.is_set():
                     result[0] = text
                     done.set()
@@ -105,7 +108,7 @@ def get_input(temi: TemiAgent, timeout: int = 15) -> str | None:
             pass
         done.set()
 
-    threading.Thread(target=_temi_listen,    daemon=True).start()
+    threading.Thread(target=_tablet_listen,   daemon=True).start()
     threading.Thread(target=_terminal_listen, daemon=True).start()
 
     done.wait(timeout=timeout + 5)   # +5s buffer past Temi's timeout
@@ -116,6 +119,8 @@ def get_input(temi: TemiAgent, timeout: int = 15) -> str | None:
 
 def _shutdown(pepper: PepperAgent, temi: TemiAgent):
     log.info("Shutting down ...")
+    pepper.clear_tablet()
+    temi.clear_screen()
     pepper.disconnect()
     temi.disconnect()
     sys.exit(0)
@@ -155,16 +160,22 @@ def main():
 
         # ── Attract phase ──────────────────────────────────────────────────────
         pepper.set_head_tracking()   # head follows people, body stays still
-        pepper.attract_visitors()    # wave + welcome pitch (existing method)
-        pepper.show_splash()         # show "tap to start" on tablet
         temi.show_welcome()          # ISO contact card on Temi screen
 
-        log.info("Waiting for visitor (touch Pepper's screen or press Enter) ...")
-        _wait_for_start(pepper)      # blocks until touch OR Enter
+        log.info("Waiting for visitor start signal on Pepper ...")
+        while True:
+            pepper.show_splash(wait_for_tap=False)
+            pepper.attract_visitors()
+            start_reason = _wait_for_start(pepper, timeout=8)
+            if start_reason:
+                log.info("Visitor started session via %s.", start_reason)
+                break
+            log.info("No start signal yet. Repeating attract cycle ...")
 
         # ── Visitor detected ───────────────────────────────────────────────────
         log.info("Visitor started session.")
         pepper.set_body_tracking()   # Pepper turns whole body toward the person
+        pepper.set_tablet_state("session")
 
         # Assign anonymous session ID (QR code scan removed — caused 20s delay)
         visitor_id = SessionManager.generate_id()
@@ -184,15 +195,14 @@ def main():
                 session_active = False
                 break
 
-            # Get input: Temi mic OR terminal (parallel threads, first wins)
-            visitor_text = get_input(temi, timeout=15)
+            # Get input: Pepper tablet OR terminal (parallel threads, first wins)
+            visitor_text = get_input(pepper, timeout=15)
 
             if not visitor_text:
-                # Nothing heard from Temi, nothing typed
+                # Nothing pressed on Pepper, nothing typed
                 pepper.say(
                     "Sorry, I couldn't catch that. "
-                    "Please type your question in the terminal, "
-                    "or speak clearly toward Temi.",
+                    "Please tap a button on Pepper or type your question in the terminal.",
                     animated=False,
                 )
                 continue
@@ -212,6 +222,7 @@ def main():
         log.info("Session stats: %s", stats)
 
         time.sleep(2)
+        temi.clear_screen()
         # Loop back to attract phase
 
 

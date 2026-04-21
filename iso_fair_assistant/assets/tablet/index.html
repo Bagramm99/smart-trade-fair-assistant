@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=1024, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>Ostfalia ISO</title>
 <style>
 * { margin:0; padding:0; box-sizing:border-box; }
@@ -18,63 +18,59 @@ body {
 /* ── Header (always visible) ── */
 header {
   background: #1a1a2e;
-  padding: 14px 20px;
+  padding: 12px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-shrink: 0;
 }
-.h-logo .uni  { font-size:22px; font-weight:900; color:#fff; letter-spacing:2px; }
-.h-logo .dept { font-size:12px; color:#aab; margin-top:2px; letter-spacing:0.5px; }
+.h-logo .uni  { font-size: 22px; font-weight:900; color:#fff; letter-spacing:2px; }
+.h-logo .dept { font-size: 12px; color:#aab; margin-top:2px; letter-spacing:0.5px; }
 .h-dots { display:flex; gap:6px; }
-.h-dots span { width:12px; height:12px; border-radius:50%; }
+.h-dots span { width:10px; height:10px; border-radius:50%; }
 
 /* ── SPLASH screen ── */
 #splash {
   flex: 1;
   display: flex;
   flex-direction: column;
-  align-items: center;
   justify-content: center;
-  gap: 24px;
+  align-items: center;
+  gap: 18px;
   padding: 20px;
+  text-align: center;
   background: #1a1a2e;
 }
-.splash-emoji { font-size: 64px; }
 .splash-title {
-  font-size: 28px;
+  font-size: 30px;
   font-weight: 900;
   color: #fff;
-  text-align: center;
   line-height: 1.2;
 }
 .splash-sub {
   font-size: 15px;
   color: #aab;
-  text-align: center;
-  max-width: 340px;
+  max-width: 360px;
+  margin: 0 auto;
   line-height: 1.5;
 }
 .splash-btn {
-  margin-top: 8px;
   background: #009ee0;
   color: white;
   border: none;
   border-radius: 50px;
-  padding: 18px 48px;
-  font-size: 20px;
+  padding: 18px 46px;
+  font-size: 22px;
   font-weight: 900;
-  letter-spacing: 0.5px;
   cursor: pointer;
   text-decoration: none;
   display: inline-block;
-  transition: transform 0.1s, filter 0.1s;
+  transition: transform 0.15s, filter 0.15s;
 }
-.splash-btn:active { transform: scale(0.95); filter: brightness(0.9); }
+.splash-btn:active { transform: scale(0.96); filter: brightness(0.95); }
 .splash-contact {
   font-size: 12px;
   color: #667;
-  text-align: center;
 }
 
 /* ── NORMAL session screen ── */
@@ -90,13 +86,15 @@ header {
   padding: 6px 16px 6px 10px; border-radius: 20px;
   font-size: 14px; font-weight: bold; transition: background 0.3s, color 0.3s;
 }
-#state-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+#state-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
 .s-idle     #state-pill { background:#ddeeff; color:#003d7a; }
 .s-idle     #state-dot  { background:#009ee0; }
 .s-speaking #state-pill { background:#ddffd8; color:#1a5c00; }
 .s-speaking #state-dot  { background:#3db030; animation: blink 0.7s infinite; }
 .s-listening #state-pill { background:#fff3cc; color:#7a4f00; }
 .s-listening #state-dot  { background:#f7a800; animation: pulse 0.9s ease-in-out infinite; }
+.s-waiting #state-pill { background:#e3f2fd; color:#004b78; }
+.s-waiting #state-dot  { background:#009ee0; animation: pulse 0.9s ease-in-out infinite; }
 .s-thinking #state-pill { background:#eeddf8; color:#5a0080; }
 .s-thinking #state-dot  { background:#9933cc; animation: spin 1s linear infinite; }
 @keyframes blink  { 0%,100%{opacity:1} 50%{opacity:0.2} }
@@ -107,35 +105,81 @@ header {
 
 #cards {
   flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-  gap: 12px;
-  padding: 0 16px 12px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px 12px;
   overflow: hidden;
 }
-.card {
-  border-radius: 20px; padding: 18px 16px;
-  display: flex; flex-direction: column; justify-content: space-between;
-  cursor: pointer; text-decoration: none;
-  transition: transform 0.12s, filter 0.12s;
+.cards-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
 }
-.card:active, .card.pressed { transform: scale(0.95); filter: brightness(0.92); }
-.card .emoji { font-size: 26px; margin-bottom: 6px; }
-.card .label { font-size: 15px; font-weight: 800; color: #1a1a2e; line-height: 1.25; }
+.cards-actions {
+  margin-top: auto;
+  display: flex;
+  gap: 10px;
+  padding-top: 10px;
+}
+.card {
+  border-radius: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  padding: 16px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  cursor: pointer;
+  text-decoration: none;
+  color: #222;
+  box-shadow: 0 6px 14px rgba(0,0,0,0.08);
+  transition: transform 0.12s;
+  width: 49%;
+  min-height: 126px;
+  margin-bottom: 12px;
+}
+.card:nth-child(odd) { margin-right: 2%; }
+.card:active, .card.pressed { transform: scale(0.96); }
+.card .emoji { display: none; }
+.card .label {
+  font-size: 19px;
+  font-weight: 800;
+  color: #1a1a2e;
+  line-height: 1.25;
+  text-align: center;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+}
 .card .arrow {
-  align-self: flex-end; width:26px; height:26px; background:rgba(0,0,0,0.1);
+  align-self: flex-end; width:24px; height:24px; background:rgba(0,0,0,0.1);
   border-radius:50%; display:flex; align-items:center; justify-content:center;
-  font-size:13px; color:#1a1a2e; margin-top:8px;
+  font-size:12px; color:#1a1a2e; margin-top:8px;
 }
 .c1{background:#ffd966} .c2{background:#c8e6c9}
 .c3{background:#b3d4f5} .c4{background:#f8bbd0}
 .c5{background:#ffe0b2} .c6{background:#e1bee7}
-.card.back { background:#e8e8e8; grid-column:1; justify-content:center; }
-.card.back .label { font-size:13px; color:#666; }
-.card.end  { background:#ffcdd2; grid-column:2; justify-content:center; }
-.card.end .label { font-size:13px; color:#c62828; font-weight:800; }
-.s-speaking #cards .card, .s-thinking #cards .card { opacity:0.3; pointer-events:none; }
+.card.back {
+  background:#eef2f5;
+  justify-content:center;
+  width: 49%;
+  margin-bottom: 0;
+  margin-right: 0;
+  min-height: 70px;
+}
+.card.back .label { font-size:15px; color:#36444f; font-weight: 800; }
+.card.end  {
+  background:#ffd7dd;
+  justify-content:center;
+  width: 49%;
+  margin-bottom: 0;
+  margin-right: 0;
+  min-height: 70px;
+}
+.card.end .label { font-size:15px; color:#b92033; font-weight:900; }
+.s-speaking #cards .card, .s-thinking #cards .card, .s-waiting #cards .card { opacity:0.3; pointer-events:none; }
 
 footer {
   text-align:center; padding:5px 16px 7px; font-size:11px;
@@ -147,6 +191,19 @@ body.showing-splash #session  { display: none; }
 body.showing-session #splash  { display: none; }
 body.showing-session footer   { display: block; }
 body.showing-splash  footer   { display: none; }
+@media (max-width: 700px) {
+  .cards-actions {
+    flex-direction: column;
+  }
+  .card {
+    width: 100%;
+    margin-right: 0;
+  }
+  .card.back, .card.end {
+    width: 100%;
+  }
+  .card:nth-child(odd) { margin-right: 0; }
+}
 </style>
 </head>
 <body id="body" class="s-idle showing-splash">
@@ -166,7 +223,6 @@ body.showing-splash  footer   { display: none; }
 
 <!-- SPLASH: shown between sessions -->
 <div id="splash">
-  <div class="splash-emoji">🌍</div>
   <div class="splash-title">Welcome to the<br>International Student Office</div>
   <div class="splash-sub">
     Get answers about Erasmus+, language courses,
@@ -198,38 +254,17 @@ var LABELS = {
   idle:      "What would you like to know?",
   speaking:  "Pepper is speaking ...",
   listening: "Listening — or tap a topic",
+  waiting:   "Waiting for Temi to finish ...",
   thinking:  "Thinking ..."
 };
 var SUBTITLES = {
   idle: "Tap a topic below, or speak to Pepper:",
   listening: "Tap a topic, or speak:",
-  speaking: "", thinking: ""
+  speaking: "",
+  waiting: "Please wait while Temi gets the flyer ready.",
+  thinking: ""
 };
 var COLORS = ["c1","c2","c3","c4","c5","c6"];
-var EMOJIS = {
-  "What is the International Student Office?": "🏛️",
-  "How do I apply for Erasmus?": "✈️",
-  "What language courses are available?": "🗣️",
-  "How do I find housing?": "🏠",
-  "What health insurance do I need?": "💊",
-  "How do I study abroad?": "🌍",
-  "Which countries can I go to?": "🗺️",
-  "How much Erasmus funding do I get?": "💶",
-  "When is the application deadline?": "📅",
-  "How are credits recognised?": "📋",
-  "What about non-EU exchanges (DAAD)?": "🌐",
-  "What German courses are available?": "🇩🇪",
-  "What is the Sprachtandem programme?": "🤝",
-  "How do I register for a course?": "✏️",
-  "Are there intensive summer courses?": "☀️",
-  "How do student dormitories work?": "🛏️",
-  "How do I find a private room?": "🔍",
-  "How much does accommodation cost?": "💰",
-  "What is address registration?": "📍",
-  "What insurance do EU students need?": "🇪🇺",
-  "What insurance do non-EU students need?": "🌏",
-  "Which providers do you recommend?": "⭐"
-};
 
 var currentState = "idle", currentQJson = "", currentScreen = "splash";
 var body = document.getElementById("body");
@@ -268,7 +303,9 @@ function sendTouch(q) {
 
 function renderCards(questions) {
   var c = document.getElementById("cards");
-  c.innerHTML = "";
+  c.innerHTML = '<div class="cards-main" id="cards-main"></div><div class="cards-actions" id="cards-actions"></div>';
+  var main = document.getElementById("cards-main");
+  var actions = document.getElementById("cards-actions");
   var normal = [], hasBack = false, hasEnd = false;
   for (var i = 0; i < questions.length; i++) {
     var q = questions[i];
@@ -283,8 +320,7 @@ function renderCards(questions) {
     var a = document.createElement("a");
     a.href = "/touch?q=" + encodeURIComponent(q) + "&redirect=1";
     a.className = "card " + COLORS[ci++ % COLORS.length];
-    a.innerHTML = '<div class="emoji">' + (EMOJIS[q] || "💬") + '</div>' +
-                  '<div class="label">' + q + '</div>' +
+    a.innerHTML = '<div class="label">' + q + '</div>' +
                   '<div class="arrow">→</div>';
     (function(link, question) {
       link.onclick = function(e) {
@@ -294,26 +330,26 @@ function renderCards(questions) {
         sendTouch(question);
       };
     })(a, q);
-    c.appendChild(a);
+    main.appendChild(a);
   }
-  var needsPad = (shown.length % 2 !== 0);
   if (hasBack) {
     var bk = document.createElement("a");
     bk.href = "/touch?q=__back__&redirect=1";
     bk.className = "card back";
-    if (needsPad && !hasEnd) bk.style.gridColumn = "1 / -1";
     bk.innerHTML = '<div class="label">← Back to main menu</div>';
     bk.onclick = function(e) { e.preventDefault(); sendTouch("__back__"); };
-    c.appendChild(bk); needsPad = false;
+    actions.appendChild(bk);
   }
   if (hasEnd) {
     var en = document.createElement("a");
     en.href = "/touch?q=__end__&redirect=1";
     en.className = "card end";
-    if (needsPad && !hasBack) en.style.gridColumn = "1 / -1";
-    en.innerHTML = '<div class="label">👋 Goodbye / That\'s all!</div>';
+    en.innerHTML = '<div class="label">Goodbye / That\'s all!</div>';
     en.onclick = function(e) { e.preventDefault(); sendTouch("__end__"); };
-    c.appendChild(en);
+    actions.appendChild(en);
+  }
+  if (!hasBack && !hasEnd) {
+    actions.style.display = "none";
   }
 }
 
