@@ -1,10 +1,17 @@
 # main.py — Smart ISO Fair Assistant
 #
-# Flow:
-#   Splash screen ("Tap to Start") → visitor taps → session starts →
-#   conversation (touch + voice in parallel) → goodbye → back to splash.
+# Run with:   python3.11 main.py
+# Stop with:  Ctrl+C  (clean shutdown)
 #
-# Zero blocking input() calls inside the session loop.
+# Flow:
+#   1. Attract loop: Pepper waves + pitch, shows splash, waits for touch OR Enter
+#   2. Visitor arrives: Pepper switches to WholeBody tracking, greets
+#   3. Conversation loop:
+#        - Temi listens (Android ASR, /listen endpoint) in a thread
+#        - Terminal input runs in parallel as fallback
+#        - First input wins
+#        - If nothing heard: Pepper apologises and asks to type or tap
+#   4. Session ends → back to step 1
 
 import logging
 import signal
@@ -18,8 +25,8 @@ from agents.temi_agent import TemiAgent
 from knowledge_base import KnowledgeBase
 from orchestrator import Orchestrator
 from session import SessionManager
-from tablet_server import TabletServer
 
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.DEBUG if config.DEBUG else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -27,191 +34,185 @@ logging.basicConfig(
 )
 log = logging.getLogger("main")
 
-# ── Whisper ────────────────────────────────────────────────────────────────────
-try:
-    import whisper as _whisper
-    _whisper_model = _whisper.load_model("base")
-    WHISPER_AVAILABLE = True
-    log.info("Whisper ready.")
-except ImportError:
-    WHISPER_AVAILABLE = False
-    _whisper_model = None
-    log.warning("openai-whisper not installed — touch-only mode.")
 
+# ── Parallel input helpers ─────────────────────────────────────────────────────
 
-def transcribe(audio) -> str | None:
-    if _whisper_model is None or audio is None:
-        return None
-    try:
-        r = _whisper_model.transcribe(audio, fp16=False, language="en")
-        t = r["text"].strip()
-        if t:
-            log.info("Whisper: %s", t)
-        return t or None
-    except Exception as e:
-        log.warning("Whisper error: %s", e)
-        return None
-
-
-# ── Parallel voice + touch input ───────────────────────────────────────────────
-
-def get_input(pepper: PepperAgent, tablet: TabletServer,
-              duration: float = 7.0) -> str | None:
+def _wait_for_start(pepper: PepperAgent) -> None:
     """
-    Poll tablet touch AND Pepper mic simultaneously.
-    Returns whichever arrives first. Never blocks the main thread.
+    Block until a visitor starts the session via either:
+      - Touching Pepper's tablet or any sensor  (pepper.wait_for_any_touch)
+      - Pressing Enter on the terminal           (input())
+
+    Both run in parallel threads — whichever fires first wins.
     """
-    voice_result = [None]
-    voice_done   = threading.Event()
+    done = threading.Event()
 
-    def _record():
-        if WHISPER_AVAILABLE:
-            audio = pepper.listen_with_mic(duration=duration)
-            voice_result[0] = transcribe(audio)
-        voice_done.set()
+    def _touch():
+        try:
+            pepper.wait_for_any_touch()   # blocks until touched
+        except Exception as e:
+            log.debug("Touch wait error: %s", e)
+        done.set()
 
-    threading.Thread(target=_record, daemon=True).start()
+    def _terminal():
+        try:
+            input("  [Press Enter when visitor is ready, or visitor taps the screen]: ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        done.set()
 
-    deadline = time.time() + duration + 2
-    while not voice_done.is_set() and time.time() < deadline:
-        touch = tablet.get_touch_input(timeout=0.2)
-        if touch:
-            log.info("Touch: %s", touch)
-            return touch
+    threading.Thread(target=_touch,    daemon=True).start()
+    threading.Thread(target=_terminal, daemon=True).start()
+    done.wait()   # wait forever until one of them fires
 
-    return voice_result[0]
+
+def get_input(temi: TemiAgent, timeout: int = 15) -> str | None:
+    """
+    Get free-form visitor input from two parallel sources:
+      A) Temi's microphone via temi.listen()  — Android ASR, full transcript
+      B) Terminal keyboard input              — always available as fallback
+
+    Returns the first non-empty result, or None if both time out.
+
+    Why Temi's mic instead of Pepper's:
+      - Temi is positioned on the table closer to the visitor
+      - Android ASR returns a full free-form transcript (no vocabulary limit)
+      - Pepper's NAOqi ASR only supports fixed keyword lists
+    """
+    result = [None]
+    done   = threading.Event()
+
+    def _temi_listen():
+        try:
+            text = temi.listen(timeout=timeout)
+            if text and not done.is_set():
+                result[0] = text
+                done.set()
+        except Exception as e:
+            log.warning("Temi listen thread error: %s", e)
+        finally:
+            # Always signal done so the terminal thread doesn't wait forever
+            done.set()
+
+    def _terminal_listen():
+        try:
+            if config.ENABLE_TYPED_FALLBACK:
+                text = input("  [TYPE your question, or speak to Temi]: ").strip()
+                if text and not done.is_set():
+                    result[0] = text
+                    done.set()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        done.set()
+
+    threading.Thread(target=_temi_listen,    daemon=True).start()
+    threading.Thread(target=_terminal_listen, daemon=True).start()
+
+    done.wait(timeout=timeout + 5)   # +5s buffer past Temi's timeout
+    return result[0]
 
 
 # ── Shutdown ───────────────────────────────────────────────────────────────────
 
-def _shutdown(pepper, temi, tablet):
+def _shutdown(pepper: PepperAgent, temi: TemiAgent):
     log.info("Shutting down ...")
     pepper.disconnect()
     temi.disconnect()
-    tablet.stop()
     sys.exit(0)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main loop ──────────────────────────────────────────────────────────────────
 
 def main():
     print("\n" + "="*55)
-    print("  Smart ISO Fair Assistant")
+    print("  Smart ISO Fair Assistant — Starting up")
     print("="*55 + "\n")
 
-    from pathlib import Path
-    base_dir = Path(__file__).resolve().parent
-
-    # ── Start tablet server ────────────────────────────────────────────────────
-    tablet = TabletServer(config.LOCAL_IP, config.TABLET_SERVER_PORT, base_dir)
-    if not tablet.start():
-        log.critical("Tablet server failed. Exiting.")
-        sys.exit(1)
-
-    # ── Connect robots ─────────────────────────────────────────────────────────
-    pepper = PepperAgent()
-    temi   = TemiAgent()
-    pepper.set_tablet_server(tablet)
-    temi.set_tablet_server(tablet)
+    # 1. Connect
+    pepper   = PepperAgent()
+    temi     = TemiAgent()
+    kb       = KnowledgeBase(config.KB_INDEX_DIR, config.EMBED_MODEL, config.KB_TOP_K)
+    sessions = SessionManager()
 
     if not pepper.connect():
         log.critical("Cannot connect to Pepper. Exiting.")
         sys.exit(1)
+
     if not temi.connect():
         log.critical("Cannot connect to Temi. Exiting.")
         sys.exit(1)
 
     pepper.print_status()
 
-    kb           = KnowledgeBase(config.KB_INDEX_DIR, config.EMBED_MODEL, config.KB_TOP_K)
-    sessions     = SessionManager()
-    orchestrator = Orchestrator(pepper, temi, kb, sessions, tablet)
+    orchestrator = Orchestrator(pepper, temi, kb, sessions)
 
-    signal.signal(signal.SIGINT, lambda *_: _shutdown(pepper, temi, tablet))
+    signal.signal(signal.SIGINT, lambda *_: _shutdown(pepper, temi))
 
-    pepper.show_tablet_page()
+    print("\nSystem ready.\n")
 
-    # ── Outer loop ─────────────────────────────────────────────────────────────
+    # 2. Outer attract loop — repeats between sessions
     while True:
 
-        # ── SPLASH: show "Tap to Start", wait for __start__ tap ───────────────
-        tablet.set_state("splash")
-        tablet.clear_touch_queue()
-        pepper.attract_visitors()
-        temi.show_welcome()
+        # ── Attract phase ──────────────────────────────────────────────────────
+        pepper.set_head_tracking()   # head follows people, body stays still
+        pepper.attract_visitors()    # wave + welcome pitch (existing method)
+        pepper.show_splash()         # show "tap to start" on tablet
+        temi.show_welcome()          # ISO contact card on Temi screen
 
-        log.info("Waiting for visitor to tap 'Start' ...")
-        while True:
-            touch = tablet.get_touch_input(timeout=0.5)
-            if touch == "__start__":
-                log.info("Visitor tapped Start.")
-                break
-            # Also start if visitor speaks (voice detected without needing Start tap)
-            if WHISPER_AVAILABLE:
-                audio = pepper.listen_with_mic(duration=3.0)
-                text  = transcribe(audio)
-                if text and len(text.strip()) > 3:
-                    log.info("Visitor spoke before tapping Start — auto-starting session.")
-                    # Pass text to session below as first input
-                    tablet.get_touch_input(timeout=0)   # flush any stale touches
-                    first_input = text
-                    break
-        else:
-            first_input = None  # started by __start__ tap
+        log.info("Waiting for visitor (touch Pepper's screen or press Enter) ...")
+        _wait_for_start(pepper)      # blocks until touch OR Enter
 
-        # ── SESSION: greet and converse ────────────────────────────────────────
-        tablet.set_state("idle")
-        tablet.clear_touch_queue()
+        # ── Visitor detected ───────────────────────────────────────────────────
+        log.info("Visitor started session.")
+        pepper.set_body_tracking()   # Pepper turns whole body toward the person
 
+        # Assign anonymous session ID (QR code scan removed — caused 20s delay)
         visitor_id = SessionManager.generate_id()
-        log.info("Session: %s", visitor_id)
+        log.info("Session ID: %s", visitor_id)
+
         orchestrator.start_interaction(visitor_id)
 
-        # If visitor already spoke before tapping Start, handle that first
-        if 'first_input' in dir() and first_input and first_input not in ("__start__", "__back__", "__end__"):
-            if not orchestrator.handle_input(first_input):
-                orchestrator.end_interaction()
-                continue
-        first_input = None  # reset
-
+        # ── Conversation loop ──────────────────────────────────────────────────
         last_input_time = time.time()
         session_active  = True
 
         while session_active:
+
             # Idle timeout
             if time.time() - last_input_time > config.SESSION_IDLE_TIMEOUT:
-                log.info("Session timed out.")
+                log.info("Session timed out — no input for %ds.", config.SESSION_IDLE_TIMEOUT)
                 session_active = False
                 break
 
-            visitor_text = get_input(pepper, tablet, duration=7.0)
+            # Get input: Temi mic OR terminal (parallel threads, first wins)
+            visitor_text = get_input(temi, timeout=15)
 
             if not visitor_text:
+                # Nothing heard from Temi, nothing typed
+                pepper.say(
+                    "Sorry, I couldn't catch that. "
+                    "Please type your question in the terminal, "
+                    "or speak clearly toward Temi.",
+                    animated=False,
+                )
                 continue
 
             last_input_time = time.time()
 
-            if visitor_text == "__back__":
-                tablet.set_questions_for_topic("welcome")
-                continue
+            # Hand off to orchestrator (LLM → Pepper speaks → Temi shows/delivers)
+            continue_session = orchestrator.handle_input(visitor_text)
 
-            # Goodbye button or farewell phrase
-            if visitor_text == "__end__" or any(
-                w in visitor_text.lower()
-                for w in ("goodbye", "bye bye", "that's all", "no more questions",
-                          "thank you so much", "no thank", "i'm done", "im done")
-            ):
-                log.info("Visitor ended session.")
-                session_active = False
-                continue
-
-            if not orchestrator.handle_input(visitor_text):
+            if not continue_session:
                 session_active = False
 
-        # End session → loop back to splash
+        # ── End of session ─────────────────────────────────────────────────────
         orchestrator.end_interaction()
-        log.info("Stats: %s", sessions.stats())
-        time.sleep(1)
+
+        stats = sessions.stats()
+        log.info("Session stats: %s", stats)
+
+        time.sleep(2)
+        # Loop back to attract phase
 
 
 if __name__ == "__main__":

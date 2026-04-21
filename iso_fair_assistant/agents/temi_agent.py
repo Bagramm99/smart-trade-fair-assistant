@@ -1,8 +1,17 @@
 # agents/temi_agent.py
+#
+# Temi integration via TemiRest HTTP API (port 8080).
+#
+# Confirmed REST endpoints:
+#   GET  /locations                                    → list saved locations
+#   POST /goto      {"text": "entrance"}               → navigate to location
+#   POST /say       {"text": "...", "language": "en"}  → speak via TTS
+#   POST /img       {"text": "http://..."}             → display image URL
+#   POST /txt       {"text": "..."}                    → display text on screen
 
-import json as _json
 import logging
 import socket
+import subprocess
 import sys
 import time
 import threading
@@ -12,222 +21,396 @@ import config
 
 log = logging.getLogger("temi")
 
-TEMI_BASE_URL           = f"http://{config.TEMI_IP}:8080"
-HTTP_CONNECT_TIMEOUT    = 3
-HTTP_READ_TIMEOUT_SHORT = 10
-HTTP_READ_TIMEOUT_GOTO  = 60   # goto blocks until Temi arrives
+# ── Temi REST helpers ─────────────────────────────────────────────────────────
 
-# ── REST helpers ──────────────────────────────────────────────────────────────
+TEMI_BASE_URL = f"http://{config.TEMI_IP}:8080"
+HTTP_CONNECT_TIMEOUT = 3
+HTTP_READ_TIMEOUT_SHORT = 8
+HTTP_READ_TIMEOUT_GOTO = 45
 
-def _plain_post(path: str, payload: dict, read_timeout: int = HTTP_READ_TIMEOUT_SHORT):
-    """POST with Content-Type: text/plain (required by TemiRest for most endpoints)."""
+
+def _is_tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Best-effort local check whether host:port is listening."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _tablet_server_running(port: int) -> bool:
+    """Check common hosts where the local server may be bound."""
+    hosts = ["127.0.0.1", "localhost", config.LOCAL_IP]
+    return any(_is_tcp_port_open(host, port) for host in hosts)
+
+
+def _temi_get(path: str, read_timeout: int = HTTP_READ_TIMEOUT_SHORT):
+    """GET helper with consistent timeout and error logging."""
     url = f"{TEMI_BASE_URL}{path}"
     try:
-        resp = requests.post(
-            url,
-            data=_json.dumps(payload),
-            headers={"Content-Type": "text/plain"},
-            timeout=(HTTP_CONNECT_TIMEOUT, read_timeout),
-        )
-        log.debug("POST %s → %s", path, resp.status_code)
-        return resp
+        return requests.get(url, timeout=(HTTP_CONNECT_TIMEOUT, read_timeout))
     except Exception as e:
-        log.warning("POST %s failed: %s", path, e)
+        log.warning("Temi GET %s failed: %s", url, e)
         return None
 
 
-def _json_post(path: str, payload: dict, read_timeout: int = HTTP_READ_TIMEOUT_SHORT):
-    """POST with Content-Type: application/json (used by /goto, /say per pytemi)."""
+def _temi_post(path: str, payload: dict, read_timeout: int):
+    """POST helper with consistent timeout and error logging."""
     url = f"{TEMI_BASE_URL}{path}"
     try:
-        resp = requests.post(url, json=payload,
-                             timeout=(HTTP_CONNECT_TIMEOUT, read_timeout))
-        log.debug("POST(json) %s → %s", path, resp.status_code)
-        return resp
+        return requests.post(url, json=payload, timeout=(HTTP_CONNECT_TIMEOUT, read_timeout))
     except Exception as e:
-        log.warning("POST(json) %s failed: %s", path, e)
-        return None
-
-
-def _temi_get(path: str, timeout: int = HTTP_READ_TIMEOUT_SHORT):
-    url = f"{TEMI_BASE_URL}{path}"
-    try:
-        return requests.get(url, timeout=(HTTP_CONNECT_TIMEOUT, timeout))
-    except Exception as e:
-        log.warning("GET %s failed: %s", path, e)
+        log.warning("Temi POST %s failed with payload %s: %s", url, payload, e)
         return None
 
 
 def _temi_locations() -> list[str] | None:
+    """Returns saved Temi locations, or None if unavailable."""
     resp = _temi_get("/locations")
     if resp is None:
         return None
     try:
         data = resp.json()
-        return [str(x) for x in data] if isinstance(data, list) else None
+        if isinstance(data, list):
+            return [str(x) for x in data]
+        return None
     except Exception:
         return None
 
 
-def _temi_goto(location: str) -> bool:
-    """Navigate to a saved location. Blocks until Temi arrives (up to 60s)."""
-    log.info("Temi → goto '%s'", location)
-    # Try both content-types — different TemiRest versions vary
-    resp = _json_post("/goto", {"text": location, "id": "iso"}, HTTP_READ_TIMEOUT_GOTO)
+def _temi_goto(location: str):
+    """Send Temi to a saved location via REST API."""
+    known_locations = _temi_locations()
+    if known_locations is not None and location not in known_locations:
+        log.error(
+            "Temi goto target '%s' not found. Available locations: %s",
+            location,
+            known_locations,
+        )
+        return
+
+    resp = _temi_post("/goto", {"text": location}, read_timeout=HTTP_READ_TIMEOUT_GOTO)
     if resp is None:
-        # Fallback: try text/plain
-        resp = _plain_post("/goto", {"text": location, "id": "iso"}, HTTP_READ_TIMEOUT_GOTO)
-    if resp:
-        log.info("Temi goto '%s' → HTTP %s", location, resp.status_code)
-        return resp.status_code < 400
-    return False
+        return
+    log.info("Temi goto '%s' -> HTTP %s", location, resp.status_code)
 
 
-def _temi_say(text: str, language: str = "english") -> bool:
-    """Temi speaks. Tries json first, then text/plain."""
-    log.info("Temi say: %s", text[:60])
-    resp = _json_post("/say", {"text": text, "language": language, "id": "iso"})
+def _temi_say(text: str, language: str = "en"):
+    """Tell Temi to speak via REST API."""
+    resp = _temi_post("/say", {"text": text, "language": language}, read_timeout=HTTP_READ_TIMEOUT_SHORT)
     if resp is None:
-        resp = _plain_post("/say", {"text": text, "language": language, "id": "iso"})
-    if resp:
-        log.info("Temi say → HTTP %s", resp.status_code)
-        return resp.status_code < 400
-    return False
+        return
+    log.info("Temi say -> HTTP %s", resp.status_code)
 
 
 def _temi_show_image(image_url: str) -> bool:
-    """Display image on Temi screen. Requires Content-Type: text/plain, key: 'image'."""
-    resp = _plain_post("/img", {"image": image_url, "id": "iso"})
-    if resp and resp.status_code < 400:
-        log.info("Temi img → HTTP %s", resp.status_code)
-        return True
-    if resp:
-        log.error("Temi img → HTTP %s | %s", resp.status_code, resp.text[:200])
-    return False
+    """
+    Tell Temi to display an image from a URL.
+
+    FIX: The /img endpoint expects:
+      - Content-Type: text/plain  (NOT application/json)
+      - Payload key: "image"      (NOT "text")
+    Previously we were sending json={"text": url} which caused the 500.
+    pytemi/robot.py line 258 confirms the correct format.
+    """
+    import json as _json
+
+    payload = {"image": image_url, "id": "iso-assistant"}
+    url = f"{TEMI_BASE_URL}/img"
+
+    try:
+        resp = requests.post(
+            url,
+            data=_json.dumps(payload),
+            headers={"Content-Type": "text/plain"},
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT_SHORT),
+        )
+        if resp.status_code < 400:
+            log.info("Temi img -> HTTP %s | url=%s", resp.status_code, image_url)
+            return True
+
+        log.error(
+            "Temi img returned HTTP %s | body=%s | image_url=%s",
+            resp.status_code,
+            (resp.text or "")[:300],
+            image_url,
+        )
+        return False
+    except Exception as e:
+        log.warning("Temi img POST failed: %s", e)
+        return False
 
 
-# ── Topic → image mapping ──────────────────────────────────────────────────────
+# ── Stub (used when pytemi is not installed) ──────────────────────────────────
+
+class _TemiStub:
+    def __init__(self, ip: str, port: int = 7070):
+        print(f"[Temi] Stub connected ({ip}:{port})")
+
+    def stop(self):
+        print("[Temi] Stopped")
+
+
+# ── Try real library, fall back to stub ───────────────────────────────────────
+
+try:
+    from pytemi import TemiRobot as _TemiBackend   # type: ignore
+    log.info("pytemi library found — using real hardware.")
+except ImportError:
+    _TemiBackend = _TemiStub
+    log.warning("pytemi not installed — using REST API directly.")
+
+
+# ── Topic → image mapping ─────────────────────────────────────────────────────
 
 TOPIC_IMAGES = {
-    "default":              "iso_contact_card.png",
-    "welcome":              "iso_contact_card.png",
-    "erasmus":              "partner_world_map.png",
-    "partner_universities": "partner_world_map.png",
-    "studying_abroad":      "partner_world_map.png",
-    "outgoing_process":     "outgoing_process.png",
-    "europe_partners":      "erasmus_europe.png",
-    "new_erasmus_partners": "erasmus_new.png",
-    "non_eu_partners":      "non_eu_partners_1.png",
-    "americas_asia":        "non_eu_partners_2.png",
-    "language_courses":     "language_courses.png",
-    "housing":              "housing_guide.png",
-    "health_insurance":     "health_insurance.png",
-    "redirect":             "campus_map.png",
-    "farewell":             "iso_contact_card.png",
+    "default":               "iso_contact_card.png",
+    "welcome":               "iso_contact_card.png",
+    "erasmus":               "partner_world_map.png",
+    "partner_universities":  "partner_world_map.png",
+    "studying_abroad":       "partner_world_map.png",
+    "outgoing_process":      "outgoing_process.png",
+    "europe_partners":       "erasmus_europe.png",
+    "new_erasmus_partners":  "erasmus_new.png",
+    "non_eu_partners":       "non_eu_partners_1.png",
+    "americas_asia":         "non_eu_partners_2.png",
+    "language_courses":      "language_courses.png",
+    "housing":               "housing_guide.png",
+    "health_insurance":      "health_insurance.png",
+    "redirect":              "campus_map.png",
+    "farewell":              "iso_contact_card.png",
 }
+
+# ── Temi speech scripts per topic ─────────────────────────────────────────────
 
 DELIVERY_SCRIPTS = {
-    "erasmus":              "Hi! I am Temi. Here is the Erasmus and partner universities flyer. Please take one from my tray!",
-    "partner_universities": "Hi! I am Temi. Here is the list of our partner universities worldwide. Feel free to take one!",
-    "language_courses":     "Hi! I am Temi. Here is the Sprachenzentrum language courses overview. Take one from my tray!",
-    "housing":              "Hi! I am Temi. Here is the housing guide for exchange students. Please take one!",
-    "health_insurance":     "Hi! I am Temi. Here is the health insurance information. Take a flyer from my tray!",
-    "outgoing_process":     "Hi! I am Temi. Here are the steps to apply for a semester abroad. Please take one!",
-    "europe_partners":      "Hi! I am Temi. Here are our Erasmus partners in Europe. Take a flyer!",
-    "non_eu_partners":      "Hi! I am Temi. Here are our non-European partner universities. Please take one!",
+    "erasmus":               "Hi! I am Temi. I have information about Erasmus and our partner universities. Please take a flyer from my tray!",
+    "partner_universities":  "Hi! I am Temi. Here is the full list of our partner universities worldwide. Feel free to take one!",
+    "language_courses":      "Hi! I am Temi. I have the Sprachenzentrum language course overview for you. Take a flyer from my tray!",
+    "housing":               "Hi! I am Temi. Here is the housing guide for exchange students. Please take one from my tray!",
+    "health_insurance":      "Hi! I am Temi. I have health insurance information for you. Take a flyer from my tray!",
+    "outgoing_process":      "Hi! I am Temi. Here are the steps to apply for a semester abroad. Please take one!",
+    "europe_partners":       "Hi! I am Temi. Here is the overview of our Erasmus partners in Europe. Take a flyer!",
+    "non_eu_partners":       "Hi! I am Temi. Here are our non-European partner universities. Please take a flyer!",
 }
-DELIVERY_DEFAULT = "Hi! I am Temi. Here is some information for you. Please take a flyer from my tray!"
 
-# Navigation — must match names saved in TemiRest app exactly
-LOCATION_VISITOR = "entrance"
-LOCATION_HOME    = "home base"
-TRAVEL_WAIT_SEC  = 3    # extra wait after goto returns
-FLYER_WAIT_SEC   = 25   # time for visitor to take flyer
+DELIVERY_DEFAULT = (
+    "Hi! I am Temi, your information assistant. "
+    "Here is some information for you. Please take a flyer from my tray!"
+)
 
+# ── Navigation constants ──────────────────────────────────────────────────────
 
-# ── TemiAgent ─────────────────────────────────────────────────────────────────
+LOCATION_VISITOR = "entrance"   # saved position ~2 meters toward visitor
+LOCATION_HOME    = "home base"  # Temi's starting position at the stand
+TRAVEL_WAIT_SEC  = 5            # seconds to wait for Temi to arrive
+FLYER_WAIT_SEC   = 30           # seconds Temi waits at visitor position
+
 
 class TemiAgent:
-    def __init__(self):
-        self._tablet_server = None
+    """
+    High-level controller for Temi.
+    Uses TemiRest HTTP API directly — no pytemi library needed.
+    The orchestrator calls deliver_flyer() and show_topic_image().
+    """
 
-    def set_tablet_server(self, ts):
-        self._tablet_server = ts
+    def __init__(self):
+        self._robot = None
+        self._asset_server_proc: subprocess.Popen | None = None
+
+    def _ensure_tablet_server(self):
+        """Start local static server for Temi images if enabled and not running."""
+        if not config.AUTO_START_TABLET_SERVER:
+            return
+
+        if _tablet_server_running(config.TABLET_SERVER_PORT):
+            return
+
+        base_dir = Path(__file__).resolve().parents[1]
+        cmd = [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(config.TABLET_SERVER_PORT),
+            "--bind",
+            "0.0.0.0",
+            "--directory",
+            str(base_dir),
+        ]
+        try:
+            self._asset_server_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(20):
+                if _tablet_server_running(config.TABLET_SERVER_PORT):
+                    log.info(
+                        "Started local tablet server at http://%s:%s",
+                        config.LOCAL_IP,
+                        config.TABLET_SERVER_PORT,
+                    )
+                    return
+                if self._asset_server_proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+
+            stderr = ""
+            if self._asset_server_proc and self._asset_server_proc.stderr:
+                try:
+                    stderr = self._asset_server_proc.stderr.read().strip()
+                except Exception:
+                    stderr = ""
+            log.warning(
+                "Local tablet server did not come up on port %s. %s",
+                config.TABLET_SERVER_PORT,
+                stderr[:220],
+            )
+        except Exception as e:
+            log.warning("Failed to start local tablet server: %s", e)
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     def connect(self) -> bool:
-        locations = _temi_locations()
-        if locations is None:
-            log.error("Cannot reach Temi REST at %s. Is TemiRest app open?", TEMI_BASE_URL)
+        try:
+            self._ensure_tablet_server()
+            self._robot = _TemiBackend(config.TEMI_IP)
+            locations = _temi_locations()
+            if not locations:
+                log.error("Temi REST not ready at %s (no locations response).", TEMI_BASE_URL)
+                return False
+            log.info("Temi ready. Locations available: %s", locations)
+            return True
+        except Exception as e:
+            log.error("Temi connection failed: %s", e)
             return False
-        log.info("Temi connected. Locations: %s", locations)
-        for loc in (LOCATION_VISITOR, LOCATION_HOME):
-            if loc not in locations:
-                log.warning(
-                    "Location '%s' NOT found in Temi app! "
-                    "Save it in TemiRest before the demo. Available: %s",
-                    loc, locations,
-                )
-        return True
 
     def disconnect(self):
-        log.info("Temi disconnected.")
+        if self._robot:
+            try:
+                self._robot.stop()
+            except Exception:
+                pass
+            log.info("Temi disconnected.")
 
-    # ── Actions ───────────────────────────────────────────────────────────────
+        if self._asset_server_proc and self._asset_server_proc.poll() is None:
+            self._asset_server_proc.terminate()
+            try:
+                self._asset_server_proc.wait(timeout=2)
+            except Exception:
+                self._asset_server_proc.kill()
+            log.info("Local tablet server stopped.")
+
+    # ── Main actions called by orchestrator ────────────────────────────────────
 
     def deliver_flyer(self, topic: str) -> bool:
         """
-        Show image immediately, then in a daemon thread:
-          goto entrance → speak → show image → wait → goto home base.
-        Returns immediately — never blocks the main thread.
+        Full flyer delivery sequence (runs in background thread):
+          1. Show topic image immediately
+          2. Drive to 'entrance' (~2 meters toward visitor)
+          3. Wait for arrival (5s)
+          4. Speak topic info aloud
+          5. Wait 30s so visitor can take flyer
+          6. Return to 'home base'
+        Returns True immediately — navigation runs in background.
         """
         image_url = self._resolve_image(topic)
         speech    = DELIVERY_SCRIPTS.get(topic, DELIVERY_DEFAULT)
 
-        log.info("deliver_flyer('%s') starting ...", topic)
+        log.info("Temi starting flyer delivery for topic '%s'", topic)
 
-        # Show image on Temi screen immediately
-        _temi_show_image(image_url)
+        # Show image immediately
+        if not _temi_show_image(image_url):
+            _temi_say("I cannot show the image on my screen right now, but I can still help you with the flyer.")
 
-        # All navigation + speech in background — never blocks caller
-        def _run():
-            try:
-                log.info("Temi thread: going to '%s'", LOCATION_VISITOR)
-                _temi_goto(LOCATION_VISITOR)
-                time.sleep(TRAVEL_WAIT_SEC)
-
-                log.info("Temi thread: speaking delivery line")
-                _temi_say(speech)
-                _temi_show_image(image_url)
-
-                log.info("Temi thread: waiting %ds", FLYER_WAIT_SEC)
-                time.sleep(FLYER_WAIT_SEC)
-
-                log.info("Temi thread: returning to '%s'", LOCATION_HOME)
-                _temi_goto(LOCATION_HOME)
-                log.info("Temi thread: done.")
-            except Exception as e:
-                log.error("Temi delivery thread crashed: %s", e, exc_info=True)
-
-        t = threading.Thread(target=_run, daemon=True, name="temi-delivery")
-        t.start()
-        log.info("Temi delivery thread started (id=%s)", t.ident)
+        # Navigate + speak in background thread
+        thread = threading.Thread(
+            target=self._delivery_sequence,
+            args=(speech, image_url),
+            daemon=True,
+        )
+        thread.start()
         return True
 
+    def _delivery_sequence(self, speech: str, image_url: str):
+        """Background: goto entrance → wait → speak → wait 30s → goto home base."""
+        log.info("Temi → navigating to '%s'", LOCATION_VISITOR)
+        _temi_goto(LOCATION_VISITOR)
+
+        # Wait for Temi to physically arrive
+        time.sleep(TRAVEL_WAIT_SEC)
+
+        # Speak and refresh image at visitor position
+        _temi_say(speech)
+        if not _temi_show_image(image_url):
+            _temi_say("My screen is currently unavailable.")
+
+        log.info("Temi → waiting %ds for visitor to take flyer ...", FLYER_WAIT_SEC)
+        time.sleep(FLYER_WAIT_SEC)
+
+        # Return to stand
+        log.info("Temi → returning to '%s'", LOCATION_HOME)
+        _temi_goto(LOCATION_HOME)
+        log.info("Temi → back at home base.")
+
     def show_topic_image(self, topic: str):
-        url = self._resolve_image(topic)
-        _temi_show_image(url)
+        """Display topic image while Pepper speaks — no navigation."""
+        image_url = self._resolve_image(topic)
+        if _temi_show_image(image_url):
+            log.debug("Temi screen updated: %s", image_url)
+        else:
+            log.warning("Temi screen not updated: %s", image_url)
 
     def show_welcome(self):
+        """Display ISO contact card at stand startup."""
         self.show_topic_image("welcome")
 
     def show_farewell(self):
         self.show_topic_image("farewell")
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    def listen(self, timeout: int = 15) -> str | None:
+        """
+        Use Temi's built-in microphone and Android ASR for free-form speech.
+        This is the primary conversation input — Temi is closer to the visitor
+        than Pepper and has a better mic in a noisy fair environment.
+
+        Calls pytemi's TemiRobot.listen() which POSTs to TemiRest /listen.
+        Returns full transcript, or None if nothing heard / error.
+
+        NOTE: self._robot must be a real TemiRobot (pytemi), not the stub.
+        If pytemi is not installed, this returns None and the terminal
+        fallback in main.py takes over.
+        """
+        if self._robot is None:
+            log.warning("Temi not connected — cannot listen.")
+            return None
+        # Stub doesn't have .listen()
+        if not hasattr(self._robot, "listen"):
+            log.warning("Temi stub active — listen() not available.")
+            return None
+        try:
+            transcript = self._robot.listen(
+                prompt="",
+                language="english",
+                timeout=timeout,
+            )
+            if transcript and transcript.strip():
+                log.info("Temi heard: %s", transcript.strip())
+                return transcript.strip()
+            log.debug("Temi listen returned empty transcript.")
+            return None
+        except Exception as e:
+            log.warning("Temi listen failed: %s", e)
+            return None
+
+    # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_image(self, topic: str) -> str:
+        """Returns HTTP URL reachable by Temi over Roboter-WLAN."""
         filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
-        if self._tablet_server:
-            return self._tablet_server.url(f"/assets/temi_screens/{filename}")
         prefix = "/" + config.TEMI_ASSETS_URL_PREFIX.strip("/")
-        return f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}{prefix}/{filename}"
+        return (
+            f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"
+            f"{prefix}/{filename}"
+        )
