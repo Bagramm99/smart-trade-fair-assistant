@@ -1,12 +1,8 @@
 # orchestrator.py — LLM orchestrator
-#
-# After each response, updates Pepper's tablet with topic-relevant
-# follow-up questions so the visitor can continue by touch.
 
 import json
 import logging
 import os
-from typing import Callable
 
 from openai import OpenAI
 
@@ -62,14 +58,9 @@ HISTORY_LIMIT = 6
 
 
 class Orchestrator:
-    def __init__(
-        self,
-        pepper: PepperAgent,
-        temi: TemiAgent,
-        kb: KnowledgeBase,
-        sessions: SessionManager,
-        tablet_server=None,
-    ):
+    def __init__(self, pepper: PepperAgent, temi: TemiAgent,
+                 kb: KnowledgeBase, sessions: SessionManager,
+                 tablet_server=None):
         self._pepper   = pepper
         self._temi     = temi
         self._kb       = kb
@@ -77,14 +68,13 @@ class Orchestrator:
         self._tablet   = tablet_server
         self._history: list[dict] = []
         self._current_visitor: str | None = None
-        self._listen_fn: Callable | None  = None
 
         api_key = config.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", "")
         self._llm = OpenAI(api_key=api_key)
 
-    def set_listen_fn(self, fn: Callable):
-        """Inject the yes/no listen function from main.py."""
-        self._listen_fn = fn
+    # kept for compatibility but no longer used
+    def set_listen_fn(self, fn):
+        pass
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -136,7 +126,8 @@ class Orchestrator:
 
     def _build_messages(self, visitor_text: str, context: str) -> list[dict]:
         system = SYSTEM_PROMPT + f"\n\nRELEVANT CONTEXT:\n{context}"
-        return [{"role": "system", "content": system}, *self._history,
+        return [{"role": "system", "content": system},
+                *self._history,
                 {"role": "user", "content": visitor_text}]
 
     def _call_llm(self, messages: list[dict]) -> dict | None:
@@ -167,7 +158,7 @@ class Orchestrator:
         if self._current_visitor and topic not in ("other", "welcome", "farewell"):
             self._sessions.record_topic(self._current_visitor, topic)
 
-        # Update Temi screen + tablet questions based on topic
+        # Update Temi screen + tablet questions
         self._temi.show_topic_image(topic)
         if self._tablet:
             self._tablet.set_questions_for_topic(topic)
@@ -175,54 +166,21 @@ class Orchestrator:
         self._pepper.set_speaking_leds()
         self._pepper.say(speech, animated=True)
 
+        # ── Flyer delivery — NO confirmation step ─────────────────────────────
+        # Removed the "Would you like Temi to bring it?" step entirely.
+        # Reasons:
+        #   1. Speed: confirmation added 5+ seconds of blocking wait
+        #   2. Reliability: the wait blocked touch input (bug 2 & 3)
+        #   3. UX: at a fair nobody refuses a flyer; the delay felt awkward
+        # Pepper's speech already introduces Temi, so the handoff is clear.
         if offer_flyer and flyer_topic:
-            self._offer_flyer(flyer_topic)
+            topic_label = flyer_topic.replace("_", " ")
+            self._pepper.say(
+                f"My colleague Temi will bring you the {topic_label} flyer now.",
+                animated=True,
+            )
+            self._temi.deliver_flyer(flyer_topic)
 
         if session_end:
             return False
         return True
-
-    def _offer_flyer(self, flyer_topic: str):
-        topic_label = flyer_topic.replace("_", " ")
-
-        if config.AUTO_ACCEPT_FLYER:
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
-            return
-
-        self._pepper.announce_temi_handoff(topic_label)
-        self._pepper.say(
-            "Would you like me to ask Temi to bring it now? "
-            "Say yes, or tap any question on the screen.",
-            animated=True,
-        )
-
-        # Listen via Whisper + tablet simultaneously (injected from main.py)
-        answer = None
-        if self._listen_fn is not None:
-            answer = self._listen_fn(self._pepper, self._tablet)
-
-        if answer is None and config.ENABLE_TYPED_FALLBACK:
-            try:
-                typed = input("  [yes/no]: ").strip().lower()
-                if typed in ("y", "yes", "yeah", "sure"):
-                    answer = "yes"
-                elif typed in ("n", "no", "nope"):
-                    answer = "no"
-            except (EOFError, KeyboardInterrupt):
-                pass
-
-        log.info("Flyer confirmation: %s", answer)
-
-        if answer == "yes":
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
-        elif answer is None:
-            self._pepper.say(
-                "I did not catch your answer. "
-                f"You can take the {topic_label} flyer from the table next to Temi."
-            )
-        else:
-            self._pepper.say(
-                f"No problem! The {topic_label} flyers are on the table next to Temi."
-            )
