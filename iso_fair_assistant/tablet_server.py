@@ -284,7 +284,7 @@ class TabletServer:
 
     def reset_to_default(self):
         self.set_questions(QUESTIONS["default"])
-        self.set_state("idle")
+        self.set_state("splash")
 
     # ── Touch input ────────────────────────────────────────────────────────────
 

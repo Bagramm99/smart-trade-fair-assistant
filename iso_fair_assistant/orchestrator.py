@@ -1,4 +1,4 @@
-# orchestrator.py — LLM orchestrator
+# orchestrator.py
 
 import json
 import logging
@@ -38,11 +38,11 @@ OUT OF SCOPE — redirect these to Studierenden-Service:
 
 If asked something out of scope, say:
 "That's a great question, but it's handled by the Studierenden-Service office rather than us.
-They're the right contact for that. Can I help you with anything about international programs?"
+Can I help you with anything about international programs?"
 
 If you don't know the answer from the context, say:
-"I'm not 100% sure about that. I recommend contacting our team directly at
-incoming-iso@ostfalia.de or visiting Véronique Bizien at Am Exer 2, Raum 008."
+"I'm not 100% sure. I recommend contacting us at incoming-iso@ostfalia.de or visiting
+Véronique Bizien at Am Exer 2, Raum 008."
 
 Always respond in JSON with this exact schema:
 {
@@ -72,9 +72,8 @@ class Orchestrator:
         api_key = config.OPENAI_API_KEY or os.getenv("OPENAI_API_KEY", "")
         self._llm = OpenAI(api_key=api_key)
 
-    # kept for compatibility but no longer used
     def set_listen_fn(self, fn):
-        pass
+        pass  # no longer used
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -82,18 +81,17 @@ class Orchestrator:
         self._current_visitor = visitor_id
         self._history = []
         self._sessions.start_session(visitor_id)
-
         if self._sessions.is_already_helped(visitor_id):
             self._pepper.greet_returning_visitor()
         else:
             self._pepper.greet_new_visitor()
-
         self._temi.show_welcome()
         if self._tablet:
             self._tablet.set_questions_for_topic("welcome")
 
     def handle_input(self, visitor_text: str) -> bool:
-        log.info("Visitor said: %s", visitor_text)
+        """Returns True to continue session, False to end."""
+        log.info("Visitor: %s", visitor_text)
 
         context  = self._kb.search(visitor_text)
         messages = self._build_messages(visitor_text, context)
@@ -105,8 +103,8 @@ class Orchestrator:
             self._pepper.say("I'm sorry, I had a technical issue. Please ask again.")
             return True
 
-        self._history.append({"role": "user",      "content": visitor_text})
-        self._history.append({"role": "assistant",  "content": json.dumps(decision)})
+        self._history.append({"role": "user",     "content": visitor_text})
+        self._history.append({"role": "assistant", "content": json.dumps(decision)})
         if len(self._history) > HISTORY_LIMIT * 2:
             self._history = self._history[-(HISTORY_LIMIT * 2):]
 
@@ -124,26 +122,25 @@ class Orchestrator:
 
     # ── LLM ───────────────────────────────────────────────────────────────────
 
-    def _build_messages(self, visitor_text: str, context: str) -> list[dict]:
+    def _build_messages(self, text: str, context: str) -> list[dict]:
         system = SYSTEM_PROMPT + f"\n\nRELEVANT CONTEXT:\n{context}"
         return [{"role": "system", "content": system},
                 *self._history,
-                {"role": "user", "content": visitor_text}]
+                {"role": "user", "content": text}]
 
     def _call_llm(self, messages: list[dict]) -> dict | None:
         try:
-            resp  = self._llm.chat.completions.create(
+            resp = self._llm.chat.completions.create(
                 model=config.LLM_MODEL,
                 messages=messages,
                 temperature=config.LLM_TEMPERATURE,
                 response_format={"type": "json_object"},
             )
-            raw      = resp.choices[0].message.content
-            decision = json.loads(raw)
+            decision = json.loads(resp.choices[0].message.content)
             log.debug("LLM: %s", decision)
             return decision
         except Exception as e:
-            log.error("LLM call failed: %s", e)
+            log.error("LLM failed: %s", e)
             return None
 
     # ── Dispatch ───────────────────────────────────────────────────────────────
@@ -158,7 +155,7 @@ class Orchestrator:
         if self._current_visitor and topic not in ("other", "welcome", "farewell"):
             self._sessions.record_topic(self._current_visitor, topic)
 
-        # Update Temi screen + tablet questions
+        # Update Temi screen + tablet buttons for current topic
         self._temi.show_topic_image(topic)
         if self._tablet:
             self._tablet.set_questions_for_topic(topic)
@@ -166,19 +163,18 @@ class Orchestrator:
         self._pepper.set_speaking_leds()
         self._pepper.say(speech, animated=True)
 
-        # ── Flyer delivery — NO confirmation step ─────────────────────────────
-        # Removed the "Would you like Temi to bring it?" step entirely.
-        # Reasons:
-        #   1. Speed: confirmation added 5+ seconds of blocking wait
-        #   2. Reliability: the wait blocked touch input (bug 2 & 3)
-        #   3. UX: at a fair nobody refuses a flyer; the delay felt awkward
-        # Pepper's speech already introduces Temi, so the handoff is clear.
+        # ── Temi flyer delivery — NO confirmation step ────────────────────────
+        # We removed the "Would you like Temi to bring it?" question entirely.
+        # Root cause of the original bug: that step used input() which blocked
+        # the main thread forever when voice detection failed, so deliver_flyer()
+        # was never reached. Now we call it directly — Pepper announces, Temi goes.
         if offer_flyer and flyer_topic:
             topic_label = flyer_topic.replace("_", " ")
             self._pepper.say(
                 f"My colleague Temi will bring you the {topic_label} flyer now.",
                 animated=True,
             )
+            log.info("Calling temi.deliver_flyer('%s')", flyer_topic)
             self._temi.deliver_flyer(flyer_topic)
 
         if session_end:
