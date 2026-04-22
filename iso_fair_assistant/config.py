@@ -66,10 +66,13 @@ TABLET_SERVER_PORT = int(os.getenv("TABLET_SERVER_PORT", str(TABLET_SERVER_PORT)
 AUTO_START_TABLET_SERVER = os.getenv("AUTO_START_TABLET_SERVER", "true").strip().lower() == "true"
 # Path part after http://LOCAL_IP:TABLET_SERVER_PORT used by Temi /img endpoint.
 TEMI_ASSETS_URL_PREFIX = os.getenv("TEMI_ASSETS_URL_PREFIX", "/assets/temi_screens").strip()
+TEMI_START_LOCATION = os.getenv("TEMI_START_LOCATION", "vorraum").strip()
+TEMI_FLYER_WAIT_TIMEOUT = int(os.getenv("TEMI_FLYER_WAIT_TIMEOUT", "45").strip())
+TEMI_FLYER_PROMPT_TIMEOUT = int(os.getenv("TEMI_FLYER_PROMPT_TIMEOUT", "20").strip())
 
 # ── Pepper behaviour ──────────────────────────────────────────────────────────
 PEPPER_LANGUAGE      = "English"
-PEPPER_VOLUME        = 0.9
+PEPPER_VOLUME        = 0.5   # 0-100
 SPEECH_TIMEOUT       = 12    # seconds to wait for visitor to speak
 QR_SCAN_TIMEOUT      = 20    # seconds for QR scan at stand entrance
 FACE_DETECT_TIMEOUT  = 8     # seconds to detect a face

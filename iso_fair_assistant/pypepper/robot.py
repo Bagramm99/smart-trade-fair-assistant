@@ -231,6 +231,37 @@ class PepperRobot:
         self.tablet.showWebview()
         return True
 
+    def tablet_url(self, path: str = "/") -> str:
+        """Return a URL on Pepper's built-in tablet server."""
+        self._require_tablet_server()
+        return self._tablet_server.url(path)
+
+    def set_tablet_state(self, state: str) -> bool:
+        """Set the state exposed to the Pepper tablet page."""
+        self._require_tablet_server()
+        self._tablet_server.set_state(state)
+        return True
+
+    def set_tablet_questions(self, questions: list[str]) -> bool:
+        """Set the visible button set on the Pepper tablet page."""
+        self._require_tablet_server()
+        self._tablet_server.set_questions(questions)
+        return True
+
+    def show_tablet_home(self) -> bool:
+        """Show the built-in Pepper start page on the tablet."""
+        return self.show_website(self.tablet_url("/"))
+
+    def get_tablet_touch(self, timeout: float = None) -> str | None:
+        """Read the next button press from the Pepper tablet page."""
+        self._require_tablet_server()
+        return self._tablet_server.get_touch_input(timeout=timeout)
+
+    def wait_for_tablet_touch(self, timeout: float = None) -> str | None:
+        """Block until the tablet start button is pressed."""
+        self._require_tablet_server()
+        return self._tablet_server.wait_for_touch(timeout=timeout)
+
     def clear_tablet(self) -> bool:
         """
         Clear the tablet.
