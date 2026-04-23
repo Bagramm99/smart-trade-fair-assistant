@@ -256,7 +256,7 @@ DELIVERY_DEFAULT = (
 # ── Navigation constants ──────────────────────────────────────────────────────
 
 LOCATION_VISITOR = config.TEMI_START_LOCATION   # saved position near the visitor
-LOCATION_HOME    = "home base"  # Temi's starting position at the stand
+LOCATION_HOME    = "dairy"  # Temi's starting position at the stand
 TRAVEL_WAIT_SEC  = 5            # seconds to wait for Temi to arrive
 FLYER_WAIT_SEC   = 30           # seconds Temi waits at visitor position
 
