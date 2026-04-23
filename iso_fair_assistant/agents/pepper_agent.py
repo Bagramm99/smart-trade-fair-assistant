@@ -121,10 +121,7 @@ class PepperAgent:
 
     def temi_returned(self):
         """Resume conversation after Temi has delivered the flyer."""
-        self.say(
-            "Temi has your flyer ready. Do you have any other questions?",
-            animated=True,
-        )
+        self.say("Temi has your flyer ready.", animated=True)
 
     def farewell(self):
         """Close the conversation."""
@@ -162,13 +159,24 @@ class PepperAgent:
         except TimeoutError:
             return None
 
-    def listen_for_speech(self, keywords: list[str]) -> str | None:
+    def listen_for_speech(
+        self,
+        keywords: list[str],
+        timeout: float | None = None,
+        threshold: float | None = None,
+    ) -> str | None:
         """
         Listen for one of a set of keywords (e.g. yes/no confirmations).
         Returns the heard keyword or None on timeout.
         """
+        if not self._robot:
+            return None
         try:
-            word = self._robot.wait_for_keyword(keywords, timeout=config.SPEECH_TIMEOUT)
+            word = self._robot.wait_for_keyword(
+                keywords,
+                timeout=timeout if timeout is not None else config.SPEECH_TIMEOUT,
+                threshold=threshold if threshold is not None else config.SPEECH_KEYWORD_THRESHOLD,
+            )
             return word
         except TimeoutError:
             return None

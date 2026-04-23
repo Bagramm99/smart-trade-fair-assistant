@@ -66,7 +66,7 @@ TABLET_SERVER_PORT = int(os.getenv("TABLET_SERVER_PORT", str(TABLET_SERVER_PORT)
 AUTO_START_TABLET_SERVER = os.getenv("AUTO_START_TABLET_SERVER", "true").strip().lower() == "true"
 # Path part after http://LOCAL_IP:TABLET_SERVER_PORT used by Temi /img endpoint.
 TEMI_ASSETS_URL_PREFIX = os.getenv("TEMI_ASSETS_URL_PREFIX", "/assets/temi_screens").strip()
-TEMI_START_LOCATION = os.getenv("TEMI_START_LOCATION", "vorraum").strip()
+TEMI_START_LOCATION = os.getenv("TEMI_START_LOCATION", "bakery").strip()
 TEMI_FLYER_WAIT_TIMEOUT = int(os.getenv("TEMI_FLYER_WAIT_TIMEOUT", "45").strip())
 TEMI_FLYER_PROMPT_TIMEOUT = int(os.getenv("TEMI_FLYER_PROMPT_TIMEOUT", "20").strip())
 
@@ -79,6 +79,9 @@ FACE_DETECT_TIMEOUT  = 8     # seconds to detect a face
 SESSION_IDLE_TIMEOUT = 180   # 3 min of silence → close session
 AUTO_ACCEPT_FLYER    = os.getenv("AUTO_ACCEPT_FLYER", "false").strip().lower() == "true"
 ENABLE_TYPED_FALLBACK = os.getenv("ENABLE_TYPED_FALLBACK", "true").strip().lower() == "true"
+ENABLE_SPEECH_FALLBACK = os.getenv("ENABLE_SPEECH_FALLBACK", "true").strip().lower() == "true"
+SPEECH_KEYWORD_TIMEOUT = int(os.getenv("SPEECH_KEYWORD_TIMEOUT", "10").strip())
+SPEECH_KEYWORD_THRESHOLD = float(os.getenv("SPEECH_KEYWORD_THRESHOLD", "0.30").strip())
 
 # ── Debug ──────────────────────────────────────────────────────────────────────
 DEBUG = True

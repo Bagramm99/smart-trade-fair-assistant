@@ -61,6 +61,20 @@ Always respond in JSON with this exact schema:
 
 HISTORY_LIMIT = 6   # number of conversation turns to keep (user + assistant pairs)
 
+SESSION_END_PHRASES = {
+    "no",
+    "no thanks",
+    "no thank you",
+    "thanks",
+    "thank you",
+    "that's all",
+    "thats all",
+    "all good",
+    "goodbye",
+    "bye",
+    "see you",
+}
+
 
 class Orchestrator:
     def __init__(self, pepper: PepperAgent, temi: TemiAgent,
@@ -107,6 +121,11 @@ class Orchestrator:
         Process one visitor utterance.
         Returns True to continue the session, False to end it.
         """
+        normalized = visitor_text.strip().lower()
+        if normalized in SESSION_END_PHRASES:
+            log.info("Visitor ended session with short exit phrase: %s", visitor_text)
+            return False
+
         log.info("Visitor said: %s", visitor_text)
 
         # 1. Retrieve relevant knowledge

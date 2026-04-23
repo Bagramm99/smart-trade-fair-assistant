@@ -13,6 +13,7 @@
 #   4. Session ends → back to step 1
 
 import logging
+import select
 import signal
 import sys
 import time
@@ -32,6 +33,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("main")
+
+# Short keywords that Pepper can reliably detect with ALSpeechRecognition.
+SPEECH_SHORTCUTS = {
+    "erasmus": "Tell me about Erasmus.",
+    "housing": "How do I find housing?",
+    "insurance": "What health insurance do I need?",
+    "language": "What language courses are available?",
+    "abroad": "How can I study abroad?",
+    "partners": "Which partner universities do you have?",
+    "goodbye": "Goodbye",
+}
 
 
 def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
@@ -81,12 +93,13 @@ def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
 
 def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
     """
-    Get visitor input from Pepper's tablet buttons and terminal keyboard.
+    Get visitor input from Pepper speech shortcuts, tablet buttons, and terminal.
 
-    Returns the first non-empty result, or None if both time out.
+    Returns the first non-empty result, or None if all sources time out.
     """
     result = [None]
-    done   = threading.Event()
+    done = threading.Event()
+    started = time.time()
 
     def _tablet_listen():
         try:
@@ -97,21 +110,55 @@ def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
         except Exception as e:
             log.debug("Pepper tablet input error: %s", e)
 
-    def _terminal_listen():
+    def _speech_listen():
+        if not config.ENABLE_SPEECH_FALLBACK:
+            return
         try:
-            if config.ENABLE_TYPED_FALLBACK:
-                text = input("  [TYPE your question, or tap a Pepper button]: ").strip()
-                if text and not done.is_set():
-                    result[0] = text
-                    done.set()
-        except (EOFError, KeyboardInterrupt):
-            pass
-        done.set()
+            heard = pepper.listen_for_speech(
+                list(SPEECH_SHORTCUTS.keys()),
+                timeout=min(timeout, config.SPEECH_KEYWORD_TIMEOUT),
+                threshold=config.SPEECH_KEYWORD_THRESHOLD,
+            )
+            if heard and not done.is_set():
+                normalized = heard.lower().strip()
+                result[0] = SPEECH_SHORTCUTS.get(normalized, heard)
+                done.set()
+        except Exception as e:
+            log.debug("Pepper speech input error: %s", e)
 
-    threading.Thread(target=_tablet_listen,   daemon=True).start()
-    threading.Thread(target=_terminal_listen, daemon=True).start()
+    threading.Thread(target=_tablet_listen, daemon=True).start()
+    threading.Thread(target=_speech_listen, daemon=True).start()
 
-    done.wait(timeout=timeout + 5)   # +5s buffer past Temi's timeout
+    if config.ENABLE_TYPED_FALLBACK:
+        print("  [Speak a keyword, tap Pepper, or type in terminal and press Enter]", flush=True)
+    deadline = started + timeout
+    while not done.is_set() and time.time() < deadline:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        # Wait briefly, allowing speech/tablet threads to set done event
+        done.wait(timeout=0.2)
+        # Check terminal at short interval without blocking
+        if not done.is_set() and config.ENABLE_TYPED_FALLBACK:
+            try:
+                readable, _, _ = select.select([sys.stdin], [], [], 0.01)
+                if readable:
+                    line = sys.stdin.readline()
+                    if line:
+                        text = line.strip()
+                        if text and not done.is_set():
+                            result[0] = text
+                            done.set()
+                            break
+            except (OSError, ValueError):
+                pass
+
+    # Allow worker threads to finish if timeout was reached in the terminal loop.
+    if not done.is_set():
+        elapsed = time.time() - started
+        remaining = max(0.0, timeout - elapsed)
+        done.wait(timeout=remaining + 0.2)
+
     return result[0]
 
 
@@ -202,7 +249,8 @@ def main():
                 # Nothing pressed on Pepper, nothing typed
                 pepper.say(
                     "Sorry, I couldn't catch that. "
-                    "Please tap a button on Pepper or type your question in the terminal.",
+                    "Please speak a short keyword like Erasmus or housing, "
+                    "tap a button on Pepper, or type your question in the terminal.",
                     animated=False,
                 )
                 continue
