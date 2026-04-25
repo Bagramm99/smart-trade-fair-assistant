@@ -87,3 +87,19 @@ class SessionManager:
         """Clear all sessions — call at the start of each fair day."""
         self._sessions = {}
         log.info("All sessions reset.")
+    
+    def get_most_discussed_topic(self) -> str | None:
+    """
+    Returns the topic discussed most often across all sessions today.
+    Useful for end-of-day reporting at the fair stand.
+
+    Example:
+        manager.get_most_discussed_topic() → "erasmus"
+    """
+    topic_counts: dict[str, int] = {}
+    for session in self._sessions.values():
+        for topic in session.get("topics", []):
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+    if not topic_counts:
+        return None
+    return max(topic_counts, key=lambda t: topic_counts[t])

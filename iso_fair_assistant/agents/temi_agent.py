@@ -565,3 +565,23 @@ class TemiAgent:
             f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"
             f"{prefix}/{filename}"
         )
+
+    def health_check(self) -> bool:
+    """
+    Checks if Temi REST API is reachable over the network.
+    Returns True if the API responds, False otherwise.
+    Useful for debugging connection issues before starting the demo.
+
+    Example:
+        temi.health_check() → True
+    """
+    try:
+        resp = requests.get(
+            f"{TEMI_BASE_URL}/locations",
+            timeout=3,
+        )
+        log.info("Temi health check → HTTP %s", resp.status_code)
+        return resp.status_code == 200
+    except Exception as e:
+        log.warning("Temi health check failed: %s", e)
+        return False   
