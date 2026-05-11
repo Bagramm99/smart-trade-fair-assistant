@@ -20,6 +20,7 @@ class PepperAgent:
 
     def __init__(self):
         self._robot: PepperRobot | None = None
+        self._is_speaking: bool = False  # True while say() is active — gates mic input
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -52,40 +53,51 @@ class PepperAgent:
     # ── Speaking ───────────────────────────────────────────────────────────────
 
     def say(self, text: str, animated: bool = False):
-        """Speak out loud. Set animated=True for expressive arm gestures."""
+        """Speak out loud. Sets _is_speaking=True while active so main.py
+        can pause the mic and avoid capturing Pepper's own voice."""
         log.debug("Pepper says: %s", text)
-        if self._robot:
-            self._robot.say(text, language=config.PEPPER_LANGUAGE, animated=animated)
-        else:
-            print(f"[Pepper] {text}")
+        self._is_speaking = True
+        try:
+            if self._robot:
+                self._robot.say(text, language=config.PEPPER_LANGUAGE, animated=animated)
+            else:
+                print(f"[Pepper] {text}")
+        finally:
+            self._is_speaking = False
+
+    @property
+    def is_speaking(self) -> bool:
+        """True while Pepper is currently talking. Check before starting mic capture."""
+        return self._is_speaking
 
     # ── Stand-level interactions ───────────────────────────────────────────────
 
+    # Rotating short attract messages — varied so they don't feel repetitive
+    _ATTRACT_MESSAGES = [
+        "Hello! Wave at me or tap my screen to get started!",
+        "Hi there! Come closer — tap my screen or just say hello.",
+        "Welcome! Ask me about Erasmus, housing, or studying abroad!",
+    ]
+    _attract_index: int = 0
+
     def attract_visitors(self):
         """
-        Pepper proactively draws attention at the fair.
-        Waves, turns head, and delivers the stand pitch.
+        Rotate short attract messages so the stand doesn't feel static.
+        Each message suggests a different way to start the interaction.
         """
         self._set_leds_attract()
         self._robot.play_animation("Wave")
-        self.say(
-            "Hello! Welcome to the International Student Office stand. "
-            "We help exchange students and anyone interested in studying abroad. "
-            "Come talk to me!",
-            animated=True,
-        )
+        msg = self._ATTRACT_MESSAGES[self._attract_index % len(self._ATTRACT_MESSAGES)]
+        self.__class__._attract_index += 1
+        self.say(msg, animated=True)
 
     def greet_new_visitor(self):
-        """Full greeting for a first-time visitor."""
+        """Greeting kept short — pilot study showed long greetings delay the conversation."""
         self._robot.play_animation("Bow")
         self._set_leds_friendly()
         self.say(
-            "Hi there! I am Pepper, your guide at the International Student Office. "
-            "I can answer questions about Erasmus, studying abroad, language courses, "
-            "housing, and more. You can also look at Temi's screen for more topic ideas and details. "
-            "What would you like to know?",
+            "Hi! I'm Pepper, your ISO guide. Ask me about Erasmus, housing, language courses, or studying abroad!",
             animated=True,
-
         )
 
     def greet_returning_visitor(self):
@@ -128,8 +140,7 @@ class PepperAgent:
         self._robot.play_animation("Bow")
         self._set_leds_goodbye()
         self.say(
-            "It was great talking with you! Good luck with your studies. "
-            "Feel free to come back anytime or contact us at incoming-iso@ostfalia.de.",
+            "Great talking with you! Grab a flyer from Temi's tray, and feel free to come back. See you!",
             animated=True,
         )
         self._robot.led_reset()

@@ -42,19 +42,45 @@ SPEECH_SHORTCUTS = {
     "language": "What language courses are available?",
     "abroad": "How can I study abroad?",
     "partners": "Which partner universities do you have?",
-    "goodbye": "Goodbye",
 }
 
 
-def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
-    """
-    Wait for a start signal from any of these sources:
-      - Pepper tablet start button / body touch
-      - Face detection (useful when the tap is unreliable)
-      - Enter in the terminal
+# ── Whisper STT (optional — runs in parallel with tablet + keyword detection) ───
 
-    Returns a short reason string, or None on timeout.
-    """
+try:
+    import whisper as _whisper
+    import sounddevice as _sd
+
+    _whisper_model = _whisper.load_model("base")
+
+    def listen_whisper(duration: float = 6.0, sample_rate: int = 16_000) -> str | None:
+        """Record from laptop mic and transcribe. Runs as a background thread
+        inside get_input() in parallel with tablet and keyword detection.
+        The 0.5s gap before recording prevents Pepper's last word bleeding in."""
+        try:
+            import numpy as _np
+            audio = _sd.rec(int(duration * sample_rate), samplerate=sample_rate,
+                            channels=1, dtype="float32")
+            _sd.wait()
+            result = _whisper_model.transcribe(audio.flatten(), fp16=False, language="en")
+            text = result["text"].strip()
+            if text:
+                log.info("Whisper heard: %s", text)
+            return text if text else None
+        except Exception as e:
+            log.debug("Whisper error: %s", e)
+            return None
+
+    log.info("Whisper STT ready.")
+
+except ImportError:
+    log.warning("whisper/sounddevice not installed — Whisper unavailable.")
+
+    def listen_whisper(duration: float = 6.0, sample_rate: int = 16_000) -> str | None:
+        return None  # tablet + keywords still work without Whisper
+
+
+def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
     result = [None]
     done = threading.Event()
 
@@ -76,7 +102,7 @@ def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
 
     def _terminal():
         try:
-            input("  [Press Enter to start, tap Pepper's button, or let Pepper detect your face]: ")
+            input("  [Press Enter to start, tap Pepper\'s button, or let Pepper detect your face]: ")
             if not done.is_set():
                 result[0] = "terminal"
                 done.set()
@@ -92,11 +118,6 @@ def _wait_for_start(pepper: PepperAgent, timeout: int = 8) -> str | None:
 
 
 def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
-    """
-    Get visitor input from Pepper speech shortcuts, tablet buttons, and terminal.
-
-    Returns the first non-empty result, or None if all sources time out.
-    """
     result = [None]
     done = threading.Event()
     started = time.time()
@@ -126,8 +147,16 @@ def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
         except Exception as e:
             log.debug("Pepper speech input error: %s", e)
 
-    threading.Thread(target=_tablet_listen, daemon=True).start()
-    threading.Thread(target=_speech_listen, daemon=True).start()
+    def _whisper_listen():
+        time.sleep(0.5)  # gap: clears Pepper's last word from mic before recording
+        text = listen_whisper(duration=6.0)
+        if text and not done.is_set():
+            result[0] = text
+            done.set()
+
+    threading.Thread(target=_tablet_listen,  daemon=True).start()
+    threading.Thread(target=_speech_listen,  daemon=True).start()
+    threading.Thread(target=_whisper_listen, daemon=True).start()
 
     if config.ENABLE_TYPED_FALLBACK:
         print("  [Speak a keyword, tap Pepper, or type in terminal and press Enter]", flush=True)
@@ -136,9 +165,7 @@ def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
         remaining = deadline - time.time()
         if remaining <= 0:
             break
-        # Wait briefly, allowing speech/tablet threads to set done event
         done.wait(timeout=0.2)
-        # Check terminal at short interval without blocking
         if not done.is_set() and config.ENABLE_TYPED_FALLBACK:
             try:
                 readable, _, _ = select.select([sys.stdin], [], [], 0.01)
@@ -153,7 +180,6 @@ def get_input(pepper: PepperAgent, timeout: int = 15) -> str | None:
             except (OSError, ValueError):
                 pass
 
-    # Allow worker threads to finish if timeout was reached in the terminal loop.
     if not done.is_set():
         elapsed = time.time() - started
         remaining = max(0.0, timeout - elapsed)
@@ -180,7 +206,6 @@ def main():
     print("  Smart ISO Fair Assistant — Starting up")
     print("="*55 + "\n")
 
-    # 1. Connect
     pepper   = PepperAgent()
     temi     = TemiAgent()
     kb       = KnowledgeBase(config.KB_INDEX_DIR, config.EMBED_MODEL, config.KB_TOP_K)
@@ -202,12 +227,10 @@ def main():
 
     print("\nSystem ready.\n")
 
-    # 2. Outer attract loop — repeats between sessions
     while True:
 
-        # ── Attract phase ──────────────────────────────────────────────────────
-        pepper.set_head_tracking()   # head follows people, body stays still
-        temi.show_welcome()          # ISO contact card on Temi screen
+        pepper.set_head_tracking()
+        temi.show_welcome()
 
         log.info("Waiting for visitor start signal on Pepper ...")
         while True:
@@ -219,36 +242,30 @@ def main():
                 break
             log.info("No start signal yet. Repeating attract cycle ...")
 
-        # ── Visitor detected ───────────────────────────────────────────────────
         log.info("Visitor started session.")
-        pepper.set_body_tracking()   # Pepper turns whole body toward the person
+        pepper.set_body_tracking()
         pepper.set_tablet_state("session")
 
-        # Assign anonymous session ID (QR code scan removed — caused 20s delay)
         visitor_id = SessionManager.generate_id()
         log.info("Session ID: %s", visitor_id)
 
         orchestrator.start_interaction(visitor_id)
 
-        # ── Conversation loop ──────────────────────────────────────────────────
         last_input_time = time.time()
         session_active  = True
 
         while session_active:
 
-            # Idle timeout
             if time.time() - last_input_time > config.SESSION_IDLE_TIMEOUT:
                 log.info("Session timed out — no input for %ds.", config.SESSION_IDLE_TIMEOUT)
                 session_active = False
                 break
 
-            # Get input: Pepper tablet OR terminal (parallel threads, first wins)
             visitor_text = get_input(pepper, timeout=15)
 
             if not visitor_text:
-                # Nothing pressed on Pepper, nothing typed
                 pepper.say(
-                    "Sorry, I couldn't catch that. "
+                    "Sorry, I couldn\'t catch that. "
                     "Please speak a short keyword like Erasmus or housing, "
                     "tap a button on Pepper, or type your question in the terminal.",
                     animated=False,
@@ -257,13 +274,11 @@ def main():
 
             last_input_time = time.time()
 
-            # Hand off to orchestrator (LLM → Pepper speaks → Temi shows/delivers)
             continue_session = orchestrator.handle_input(visitor_text)
 
             if not continue_session:
                 session_active = False
 
-        # ── End of session ─────────────────────────────────────────────────────
         orchestrator.end_interaction()
 
         stats = sessions.stats()
@@ -271,7 +286,6 @@ def main():
 
         time.sleep(2)
         temi.clear_screen()
-        # Loop back to attract phase
 
 
 if __name__ == "__main__":
