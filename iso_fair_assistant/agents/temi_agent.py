@@ -28,7 +28,6 @@ HTTP_CONNECT_TIMEOUT = 3
 HTTP_READ_TIMEOUT_SHORT = 8
 HTTP_READ_TIMEOUT_GOTO = 45
 
-
 def _is_tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
     """Best-effort local check whether host:port is listening."""
     try:
@@ -42,6 +41,19 @@ def _tablet_server_running(port: int) -> bool:
     """Check common hosts where the local server may be bound."""
     hosts = ["127.0.0.1", "localhost", config.LOCAL_IP]
     return any(_is_tcp_port_open(host, port) for host in hosts)
+
+
+def _tablet_server_healthy(port: int) -> bool:
+    """Check that the image server responds with an actual PNG, not just an open port."""
+    sample_url = (
+        f"http://{config.LOCAL_IP}:{port}"
+        f"{config.TEMI_ASSETS_URL_PREFIX}/partner_world_map.png"
+    )
+    try:
+        resp = requests.get(sample_url, timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT_SHORT))
+        return resp.status_code < 400 and resp.content.startswith(b"\x89PNG\r\n\x1a\n")
+    except Exception:
+        return False
 
 
 def _temi_get(path: str, read_timeout: int = HTTP_READ_TIMEOUT_SHORT):
@@ -141,6 +153,36 @@ def _temi_show_image(image_url: str) -> bool:
         return False
 
 
+def _temi_show_text(text: str) -> bool:
+    """Tell Temi to display text on the tablet screen."""
+    import json as _json
+
+    payload = {"text": text, "id": "iso-assistant"}
+    url = f"{TEMI_BASE_URL}/txt"
+
+    try:
+        resp = requests.post(
+            url,
+            data=_json.dumps(payload),
+            headers={"Content-Type": "text/plain"},
+            timeout=(HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT_SHORT),
+        )
+        if resp.status_code < 400:
+            log.info("Temi txt -> HTTP %s | text=%s", resp.status_code, text)
+            return True
+
+        log.error(
+            "Temi txt returned HTTP %s | body=%s | text=%s",
+            resp.status_code,
+            (resp.text or "")[:300],
+            text,
+        )
+        return False
+    except Exception as e:
+        log.warning("Temi txt POST failed: %s", e)
+        return False
+
+
 # ── Stub (used when pytemi is not installed) ──────────────────────────────────
 
 class _TemiStub:
@@ -180,6 +222,18 @@ TOPIC_IMAGES = {
     "redirect":              "campus_map.png",
     "farewell":              "iso_contact_card.png",
 }
+# Flyer front covers (displayed on Temi screen while delivering)
+FLYER_COVERS = {
+    "erasmus":               "flyer_erasmus_cover.png",
+    "partner_universities":  "flyer_partners_cover.png",
+    "language_courses":      "flyer_language_cover.png",
+    "housing":               "flyer_housing_cover.png",
+    "health_insurance":      "flyer_insurance_cover.png",
+    "outgoing_process":      "flyer_outgoing_cover.png",
+    "europe_partners":       "flyer_europe_cover.png",
+    "non_eu_partners":       "flyer_non_eu_cover.png",
+}
+
 
 # ── Temi speech scripts per topic ─────────────────────────────────────────────
 
@@ -201,8 +255,8 @@ DELIVERY_DEFAULT = (
 
 # ── Navigation constants ──────────────────────────────────────────────────────
 
-LOCATION_VISITOR = "entrance"   # saved position ~2 meters toward visitor
-LOCATION_HOME    = "home base"  # Temi's starting position at the stand
+LOCATION_VISITOR = config.TEMI_START_LOCATION   # saved position near the visitor
+LOCATION_HOME    = "dairy"  # Temi's starting position at the stand
 TRAVEL_WAIT_SEC  = 5            # seconds to wait for Temi to arrive
 FLYER_WAIT_SEC   = 30           # seconds Temi waits at visitor position
 
@@ -217,14 +271,29 @@ class TemiAgent:
     def __init__(self):
         self._robot = None
         self._asset_server_proc: subprocess.Popen | None = None
+        self._delivery_thread: threading.Thread | None = None
+        self._delivery_ready_event = threading.Event()
+        self._delivery_done_event = threading.Event()
 
     def _ensure_tablet_server(self):
         """Start local static server for Temi images if enabled and not running."""
         if not config.AUTO_START_TABLET_SERVER:
             return
 
-        if _tablet_server_running(config.TABLET_SERVER_PORT):
+        if _tablet_server_running(config.TABLET_SERVER_PORT) and _tablet_server_healthy(config.TABLET_SERVER_PORT):
             return
+
+        if _tablet_server_running(config.TABLET_SERVER_PORT):
+            log.warning("Tablet server port %s is open but not serving images; restarting.", config.TABLET_SERVER_PORT)
+            if self._asset_server_proc and self._asset_server_proc.poll() is None:
+                try:
+                    self._asset_server_proc.terminate()
+                    self._asset_server_proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        self._asset_server_proc.kill()
+                    except Exception:
+                        pass
 
         base_dir = Path(__file__).resolve().parents[1]
         cmd = [
@@ -241,11 +310,11 @@ class TemiAgent:
             self._asset_server_proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 text=True,
             )
             for _ in range(20):
-                if _tablet_server_running(config.TABLET_SERVER_PORT):
+                if _tablet_server_healthy(config.TABLET_SERVER_PORT):
                     log.info(
                         "Started local tablet server at http://%s:%s",
                         config.LOCAL_IP,
@@ -256,16 +325,9 @@ class TemiAgent:
                     break
                 time.sleep(0.1)
 
-            stderr = ""
-            if self._asset_server_proc and self._asset_server_proc.stderr:
-                try:
-                    stderr = self._asset_server_proc.stderr.read().strip()
-                except Exception:
-                    stderr = ""
             log.warning(
-                "Local tablet server did not come up on port %s. %s",
+                "Local tablet server did not come up on port %s.",
                 config.TABLET_SERVER_PORT,
-                stderr[:220],
             )
         except Exception as e:
             log.warning("Failed to start local tablet server: %s", e)
@@ -281,10 +343,39 @@ class TemiAgent:
                 log.error("Temi REST not ready at %s (no locations response).", TEMI_BASE_URL)
                 return False
             log.info("Temi ready. Locations available: %s", locations)
+            log.info("Temi flyer start location: %s", LOCATION_VISITOR)
+            # Move Temi to home base at startup
+            _temi_goto(LOCATION_HOME)
+            time.sleep(2)
             return True
         except Exception as e:
             log.error("Temi connection failed: %s", e)
             return False
+
+    def get_locations(self) -> list[str]:
+        """Return the saved Temi locations currently available on the robot."""
+        locations = _temi_locations()
+        return locations or []
+
+    def preview_locations(self, pause_seconds: float = 2.0) -> list[str]:
+        """
+        Cycle through all saved locations so you can see the terminal log and
+        decide which one to use as the start/end point.
+
+        Returns the list of locations that were previewed.
+        """
+        locations = self.get_locations()
+        if not locations:
+            log.info("No Temi locations available to preview.")
+            return []
+
+        for location in locations:
+            log.info("Previewing Temi location: %s", location)
+            _temi_goto(location)
+            time.sleep(pause_seconds)
+
+        log.info("Finished previewing %d Temi locations.", len(locations))
+        return locations
 
     def disconnect(self):
         if self._robot:
@@ -319,6 +410,8 @@ class TemiAgent:
         speech    = DELIVERY_SCRIPTS.get(topic, DELIVERY_DEFAULT)
 
         log.info("Temi starting flyer delivery for topic '%s'", topic)
+        self._delivery_ready_event.clear()
+        self._delivery_done_event.clear()
 
         # Show image immediately
         if not _temi_show_image(image_url):
@@ -327,14 +420,27 @@ class TemiAgent:
         # Navigate + speak in background thread
         thread = threading.Thread(
             target=self._delivery_sequence,
-            args=(speech, image_url),
+            args=(speech, image_url, topic),
             daemon=True,
         )
         thread.start()
+        self._delivery_thread = thread
         return True
 
-    def _delivery_sequence(self, speech: str, image_url: str):
-        """Background: goto entrance → wait → speak → wait 30s → goto home base."""
+    def wait_for_delivery(self, timeout: float | None = None) -> bool:
+        """Wait until the current flyer delivery thread finishes."""
+        thread = self._delivery_thread
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()
+
+    def wait_for_delivery_ready(self, timeout: float | None = None) -> bool:
+        """Wait until Temi has arrived, spoken, and shown the flyer."""
+        return self._delivery_ready_event.wait(timeout=timeout)
+
+    def _delivery_sequence(self, speech: str, image_url: str, flyer_topic: str | None = None):
+        """Background: goto entrance → wait → speak → display flyer cover → wait → goto home base."""
         log.info("Temi → navigating to '%s'", LOCATION_VISITOR)
         _temi_goto(LOCATION_VISITOR)
 
@@ -346,6 +452,23 @@ class TemiAgent:
         if not _temi_show_image(image_url):
             _temi_say("My screen is currently unavailable.")
 
+        # Display flyer front cover if available
+        if flyer_topic:
+            flyer_cover_url = self._resolve_flyer_cover(flyer_topic)
+            if flyer_cover_url:
+                time.sleep(1)
+                if _temi_show_image(flyer_cover_url):
+                    log.info("Displaying flyer cover for: %s", flyer_topic)
+                else:
+                    log.warning("Failed to display flyer cover for: %s", flyer_topic)
+                    _temi_show_text("Please grab a flyer.")
+            else:
+                log.warning("No flyer cover configured for: %s", flyer_topic)
+                _temi_show_text("Please grab a flyer.")
+
+        self._delivery_ready_event.set()
+        log.info("Temi flyer handoff is ready for Pepper.")
+
         log.info("Temi → waiting %ds for visitor to take flyer ...", FLYER_WAIT_SEC)
         time.sleep(FLYER_WAIT_SEC)
 
@@ -353,6 +476,7 @@ class TemiAgent:
         log.info("Temi → returning to '%s'", LOCATION_HOME)
         _temi_goto(LOCATION_HOME)
         log.info("Temi → back at home base.")
+        self._delivery_done_event.set()
 
     def show_topic_image(self, topic: str):
         """Display topic image while Pepper speaks — no navigation."""
@@ -369,11 +493,73 @@ class TemiAgent:
     def show_farewell(self):
         self.show_topic_image("farewell")
 
+    def clear_screen(self):
+        """Clear Temi's screen after a session ends."""
+        if self._robot is None:
+            return
+        try:
+            if hasattr(self._robot, "clear_tablet"):
+                self._robot.clear_tablet()
+            elif hasattr(self._robot, "clear_screen"):
+                self._robot.clear_screen()
+        except Exception as e:
+            log.debug("Temi clear screen failed: %s", e)
+
+    def listen(self, timeout: int = 15) -> str | None:
+        """
+        Use Temi's built-in microphone and Android ASR for free-form speech.
+        This is the primary conversation input — Temi is closer to the visitor
+        than Pepper and has a better mic in a noisy fair environment.
+
+        Calls pytemi's TemiRobot.listen() which POSTs to TemiRest /listen.
+        Returns full transcript, or None if nothing heard / error.
+
+        NOTE: self._robot must be a real TemiRobot (pytemi), not the stub.
+        If pytemi is not installed, this returns None and the terminal
+        fallback in main.py takes over.
+        """
+        if self._robot is None:
+            log.warning("Temi not connected — cannot listen.")
+            return None
+        # Stub doesn't have .listen()
+        if not hasattr(self._robot, "listen"):
+            log.warning("Temi stub active — listen() not available.")
+            return None
+        try:
+            transcript = self._robot.listen(
+                prompt="",
+                language="english",
+                timeout=timeout,
+            )
+            if transcript and transcript.strip():
+                log.info("Temi heard: %s", transcript.strip())
+                return transcript.strip()
+            log.debug("Temi listen returned empty transcript.")
+            return None
+        except Exception as e:
+            log.warning("Temi listen failed: %s", e)
+            return None
+
     # ── Internal helpers ───────────────────────────────────────────────────────
 
     def _resolve_image(self, topic: str) -> str:
         """Returns HTTP URL reachable by Temi over Roboter-WLAN."""
         filename = TOPIC_IMAGES.get(topic, TOPIC_IMAGES["default"])
+        prefix = "/" + config.TEMI_ASSETS_URL_PREFIX.strip("/")
+        return (
+            f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"
+            f"{prefix}/{filename}"
+        )
+
+    def _resolve_flyer_cover(self, flyer_topic: str) -> str | None:
+        """Returns HTTP URL for flyer front cover, or None if not available."""
+        filename = FLYER_COVERS.get(flyer_topic)
+        if not filename:
+            return None
+        asset_path = Path(__file__).resolve().parents[1] / config.TEMI_ASSETS_DIR / filename
+        if not asset_path.exists():
+            log.warning("Flyer cover asset missing: %s", asset_path)
+            return None
         prefix = "/" + config.TEMI_ASSETS_URL_PREFIX.strip("/")
         return (
             f"http://{config.LOCAL_IP}:{config.TABLET_SERVER_PORT}"

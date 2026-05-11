@@ -6,6 +6,8 @@
 import json
 import logging
 import os
+import threading
+import time
 
 from openai import OpenAI
 
@@ -59,6 +61,20 @@ Always respond in JSON with this exact schema:
 
 HISTORY_LIMIT = 6   # number of conversation turns to keep (user + assistant pairs)
 
+SESSION_END_PHRASES = {
+    "no",
+    "no thanks",
+    "no thank you",
+    "thanks",
+    "thank you",
+    "that's all",
+    "thats all",
+    "all good",
+    "goodbye",
+    "bye",
+    "see you",
+}
+
 
 class Orchestrator:
     def __init__(self, pepper: PepperAgent, temi: TemiAgent,
@@ -90,6 +106,8 @@ class Orchestrator:
         self._current_visitor = visitor_id
         self._history = []
         self._sessions.start_session(visitor_id)
+        self._pepper.set_tablet_state("session")
+        self._pepper.set_tablet_questions_for_topic("welcome")
 
         if self._sessions.is_already_helped(visitor_id):
             self._pepper.greet_returning_visitor()
@@ -103,6 +121,11 @@ class Orchestrator:
         Process one visitor utterance.
         Returns True to continue the session, False to end it.
         """
+        normalized = visitor_text.strip().lower()
+        if normalized in SESSION_END_PHRASES:
+            log.info("Visitor ended session with short exit phrase: %s", visitor_text)
+            return False
+
         log.info("Visitor said: %s", visitor_text)
 
         # 1. Retrieve relevant knowledge
@@ -113,11 +136,13 @@ class Orchestrator:
 
         # 3. Show thinking LEDs while waiting for LLM
         self._pepper.set_thinking_leds()
+        self._pepper.set_tablet_state("thinking")
 
         # 4. Call LLM
         decision = self._call_llm(messages)
         if decision is None:
             self._pepper.say("I'm sorry, I had a technical issue. Please ask again.")
+            self._pepper.set_tablet_state("listening")
             return True
 
         # 5. Update conversation history
@@ -137,6 +162,8 @@ class Orchestrator:
         self._history = []
         self._pepper.farewell()
         self._temi.show_farewell()
+        self._pepper.clear_tablet()
+        self._temi.clear_screen()
 
     # ── LLM ───────────────────────────────────────────────────────────────────
 
@@ -177,6 +204,20 @@ class Orchestrator:
         offer_flyer = decision.get("offer_flyer", False)
         flyer_topic = decision.get("flyer_topic")
         session_end = decision.get("session_end", False)
+        flyer_topics = {
+            "erasmus",
+            "partner_universities",
+            "studying_abroad",
+            "outgoing_process",
+            "europe_partners",
+            "non_eu_partners",
+            "language_courses",
+            "housing",
+            "health_insurance",
+        }
+
+        if topic:
+            self._pepper.set_tablet_questions_for_topic(topic)
 
         # Track topic in session
         if self._current_visitor and topic not in ("other", "welcome", "farewell"):
@@ -188,9 +229,11 @@ class Orchestrator:
         # Pepper speaks
         self._pepper.set_speaking_leds()
         self._pepper.say(speech, animated=True)
+        self._pepper.set_tablet_state("listening")
 
         # Offer a flyer if the LLM decided one would help
-        if offer_flyer and flyer_topic:
+        if (offer_flyer or topic in flyer_topics) and (flyer_topic or topic):
+            flyer_topic = flyer_topic or topic
             self._offer_flyer(flyer_topic)
 
         # Session end?
@@ -201,62 +244,110 @@ class Orchestrator:
 
     def _offer_flyer(self, flyer_topic: str):
         """
-        Ask visitor's permission, then trigger Temi if they say yes.
+        Announce Temi handoff and trigger flyer delivery.
 
-        Uses Whisper for yes/no detection instead of Pepper's NAOqi ASR —
-        NAOqi keyword recognition is unreliable in noisy fair environments
-        (consistently mishears "yes" as "no" etc). Whisper is much more accurate.
-        The listen function is injected at runtime from main.py via set_listen_fn().
+        For yes/no confirmation we use Pepper's own keyword detection
+        (wait_for_keyword via pepper.listen_for_speech) which was already
+        working for simple words. If nothing is heard within the timeout,
+        we auto-send Temi — at a fair, defaulting to yes is better UX
+        than blocking forever waiting for an answer.
+
+        The old input() fallback has been removed because it blocked the
+        main thread indefinitely when voice detection failed, preventing
+        temi.deliver_flyer() from ever being called.
         """
         topic_label = flyer_topic.replace("_", " ")
 
         if config.AUTO_ACCEPT_FLYER:
-            log.info("AUTO_ACCEPT_FLYER enabled — skipping voice confirmation.")
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
+            log.info("AUTO_ACCEPT_FLYER — skipping confirmation.")
+            self._deliver_and_wait(flyer_topic)
             return
 
         self._pepper.announce_temi_handoff(topic_label)
         self._pepper.say(
-            "Would you like me to ask Temi to bring it now? "
-            "Please say yes or no.",
+            "Would you like me to ask Temi to bring it now? Please say yes or no.",
             animated=True,
         )
 
-        # Use Whisper for yes/no — much more accurate than Pepper's built-in ASR
-        answer = None
-        if self._listen_fn is not None:
-            transcript = self._listen_fn(duration=5.0)   # short recording for yes/no
-            if transcript:
-                t = transcript.lower()
-                if any(w in t for w in ("yes", "yeah", "yep", "sure", "okay", "please", "go ahead")):
-                    answer = "yes"
-                elif any(w in t for w in ("no", "nope", "don't", "not", "skip")):
-                    answer = "no"
-                else:
-                    log.info("Whisper transcript did not match yes/no: '%s'", transcript)
+        # Offer the same confirmation directly on the tablet for faster flow.
+        self._pepper.set_tablet_questions([
+            "Yes, bring the flyer",
+            "No, thanks",
+        ])
 
-        # Fallback to keyboard if Whisper not available or nothing heard
-        if answer is None and config.ENABLE_TYPED_FALLBACK:
-            try:
-                typed = input("  [Pepper did not catch yes/no. TYPE yes or no]: ").strip().lower()
-                if typed in ("yes", "y", "yeah", "sure"):
-                    answer = "yes"
-                elif typed in ("no", "n", "nope"):
-                    answer = "no"
-            except (EOFError, KeyboardInterrupt):
-                answer = None
+        answer = self._wait_for_flyer_confirmation()
 
-        log.info("Flyer confirmation: %s", answer)
-        if answer == "yes":
-            self._temi.deliver_flyer(flyer_topic)
-            self._pepper.temi_returned()
-        elif answer is None:
+        log.info("Flyer confirmation heard: %s", answer)
+
+        # Restore topic shortcuts after this temporary yes/no prompt.
+        self._pepper.set_tablet_questions_for_topic(flyer_topic)
+
+        if answer is None:
+            # Nothing heard — auto-send Temi rather than blocking
+            log.info("No answer heard — auto-sending Temi.")
             self._pepper.say(
-                "I did not catch your answer, so I will not send Temi yet. "
-                f"You can also take the {topic_label} flyer from the table next to Temi."
+                f"I'll go ahead and ask Temi to bring the {topic_label} flyer.",
+                animated=True,
             )
+            self._deliver_and_wait(flyer_topic)
+        elif answer.lower() in ("yes", "yeah", "yep", "sure", "okay"):
+            self._deliver_and_wait(flyer_topic)
         else:
             self._pepper.say(
-                f"No problem! You can find the {topic_label} flyers on the table next to Temi."
+                f"No problem! The {topic_label} flyers are on the table next to Temi."
             )
+
+    def _deliver_and_wait(self, flyer_topic: str):
+        """Start Temi delivery, show waiting state, then continue when Temi is ready or timed out."""
+        self._pepper.set_tablet_state("waiting")
+        self._temi.deliver_flyer(flyer_topic)
+
+        if self._temi.wait_for_delivery_ready(timeout=config.TEMI_FLYER_PROMPT_TIMEOUT):
+            self._pepper.temi_returned()
+            self._pepper.set_tablet_state("listening")
+            return
+
+        deadline = time.time() + config.TEMI_FLYER_WAIT_TIMEOUT
+        while time.time() < deadline:
+            if self._temi.wait_for_delivery(timeout=1.0):
+                self._pepper.temi_returned()
+                self._pepper.set_tablet_state("listening")
+                return
+
+        log.info("Temi delivery timed out after %ss; continuing anyway.", config.TEMI_FLYER_WAIT_TIMEOUT)
+        self._pepper.say(
+            "Temi is taking a little longer, so please feel free to continue looking at the screen.",
+            animated=False,
+        )
+        self._pepper.set_tablet_state("listening")
+
+    def _wait_for_flyer_confirmation(self, timeout: int = 12) -> str | None:
+        """Wait for either voice (yes/no) or tablet yes/no button input."""
+        answer = [None]
+        done = threading.Event()
+
+        def _voice():
+            heard = self._pepper.listen_for_speech(
+                ["yes", "yeah", "yep", "sure", "okay", "no", "nope"]
+            )
+            if heard and not done.is_set():
+                answer[0] = heard.lower().strip()
+                done.set()
+
+        def _tablet():
+            choice = self._pepper.get_tablet_input(timeout=timeout)
+            if not choice or done.is_set():
+                return
+            normalized = choice.lower().strip()
+            if "yes" in normalized:
+                answer[0] = "yes"
+                done.set()
+            elif "no" in normalized:
+                answer[0] = "no"
+                done.set()
+
+        threading.Thread(target=_voice, daemon=True).start()
+        threading.Thread(target=_tablet, daemon=True).start()
+
+        done.wait(timeout=timeout + 1)
+        return answer[0]
